@@ -120,7 +120,14 @@ if(CLANG_TIDY)
   #  append ";--fix" to arguments above to apply automatic fix (if the given checks support it)
 endif(CLANG_TIDY)
 
-add_executable(OpenSCADExe src/main_wrapper.cc)
+add_executable(OpenSCADExe src/main_wrapper.cc
+        src/raytracer/RTCSGTreeVisitor.h
+        src/raytracer/RTCSGTreeVisitor.cpp
+        src/raytracer/RTCSGNode.h
+        src/glview/raytracer/RTGLView.h
+        src/glview/raytracer/RTGLView.cpp
+        src/raytracer/OBB.cpp)
+set_target_properties(OpenSCADExe PROPERTIES AUTOMOC ON)
 if (APPLE)
   set_target_properties(OpenSCADExe PROPERTIES
       OUTPUT_NAME "OpenSCAD"

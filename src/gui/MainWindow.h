@@ -36,6 +36,8 @@
 #include "core/Context.h"
 #include "glview/Renderer.h"
 #include "core/SourceFile.h"
+#include "glview/raytracer/RTGLView.h"
+
 #ifdef STATIC_QT_SVG_PLUGIN
 #include <QtPlugin>
 Q_IMPORT_PLUGIN(QSvgPlugin)
@@ -206,6 +208,11 @@ private:
   // Change the perspective mode of the 3D view.
   typedef Camera::ProjectionType ProjectionType;
   void setProjectionType(ProjectionType mode);
+
+  RTGLView *rtglview = nullptr;
+  std::shared_ptr<RTCSGNode> rtRoot;
+  bool rtViewActive = false;
+  void viewModeRaytracer();
 
   void loadViewSettings();
   void loadDesignSettings();

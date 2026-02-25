@@ -1,0 +1,56 @@
+#pragma once
+
+#include "glview/system-gl.h"
+#include "gui/MouseSelector.h"
+
+#include <QWheelEvent>
+#include <QtGlobal>
+#include <QOpenGLWidget>
+#include <string>
+
+#include <Eigen/Core>
+
+#include "raytracer/RTCSGNode.h"
+
+class RTGLView : public QOpenGLWidget
+{
+  Q_OBJECT
+
+public:
+  explicit RTGLView(QWidget *parent = nullptr);
+  ~RTGLView() override;
+
+  void setCamera(const Camera* cam);
+  void setRTTree(std::shared_ptr<RTCSGNode> root);
+  Eigen::Matrix4f getViewMatrix(const Camera& cam);
+
+protected:
+  void initializeGL() override;
+  void resizeGL(int w, int h) override;
+  void paintGL() override;
+  void keyPressEvent(QKeyEvent *event) override;
+
+private:
+  void rebuildGPUData();
+  GLuint compileComputeShader(const std::string& source);
+  GLuint compileQuadShader(const std::string& vertSrc, const std::string& fragSrc);
+
+  const Camera* openscadCam = nullptr;
+  std::shared_ptr<RTCSGNode> rtRoot;
+
+  // GPU handles
+  GLuint computeProgram = 0;
+  GLuint quadProgram = 0;
+  GLuint outputTexture = 0;
+  GLuint quadVAO = 0, quadVBO = 0;
+  GLuint primitivesSSBO = 0;
+  GLuint operationsSSBO = 0;
+  GLuint commandsSSBO = 0;
+
+  bool initialized = false;
+  bool needsRebuild = true;
+
+  // Camera (simple for now)
+  Eigen::Vector3f camPos{0.0f, 0.0f, 3.0f};
+  float fov = 45.0f;
+};

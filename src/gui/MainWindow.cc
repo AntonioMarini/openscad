@@ -143,6 +143,7 @@
 #include "utils/exceptions.h"
 #include "utils/printutils.h"
 #include "version.h"
+#include "raytracer/RTCSGTreeVisitor.h"
 
 #ifdef ENABLE_CGAL
 #include "geometry/cgal/cgal.h"
@@ -759,6 +760,10 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
   auto shortcutExport3D = new QShortcut(QKeySequence("F7"), this);
   QObject::connect(shortcutExport3D, &QShortcut::activated, this,
                    &MainWindow::onWindowShortcutExport3DActivated);
+
+  auto shortcutRaytracer = new QShortcut(QKeySequence("F10"), this);
+  QObject::connect(shortcutRaytracer, &QShortcut::activated, this,
+                   &MainWindow::viewModeRaytracer);
 
   // Adds dock specific behavior on visibility change
   QObject::connect(editorDock, &Dock::visibilityChanged, this,
@@ -1448,7 +1453,7 @@ void MainWindow::instantiateRoot()
 }
 
 /*!
-   Generates CSG tree for OpenCSG evaluation.
+   Generates CSG tree for OpenCSG evaluation
    Assumes that the design has been parsed and evaluated (this->root_node is set)
  */
 void MainWindow::compileCSG()
@@ -1467,6 +1472,13 @@ void MainWindow::compileCSG()
 #ifdef ENABLE_OPENCSG
     CSGTreeEvaluator csgrenderer(this->tree, &geomevaluator);
 #endif
+
+    RTCSGTreeVisitor rtVisitor;
+    this->rtRoot = rtVisitor.buildRTTree(*this->tree.root()); // Tree for raytracing view
+   if (this->rtglview) {
+    this->rtglview->setRTTree(this->rtRoot);
+   }
+    printRTCSGTree(rtRoot);
 
     if (!isClosing) progress_report_prep(this->rootNode, report_func, this);
     else return;
@@ -3092,6 +3104,47 @@ void MainWindow::viewModeShowScaleProportional()
   settings.setValue("view/showScaleProportional", viewActionShowScaleProportional->isChecked());
   this->qglview->setShowScaleProportional(viewActionShowScaleProportional->isChecked());
   this->qglview->update();
+}
+
+void MainWindow::viewModeRaytracer()
+{
+  if (!this->rtRoot) {
+    LOG("No RT tree available. Run preview first (F5).");
+    return;
+  }
+
+  if (!this->rtglview) {
+    // Create the RT widget, parented to the same container as qglview
+    this->rtglview = new RTGLView(this->qglview->parentWidget());
+    this->rtglview->setCamera(&this->qglview->cam);
+  }
+
+  if (!rtViewActive) {
+    // Swap: hide OpenCSG view, show RT view in same position
+    this->rtglview->setGeometry(this->qglview->geometry());
+    this->rtglview->setRTTree(this->rtRoot);
+    this->qglview->hide();
+    this->rtglview->show();
+    this->rtglview->setFocus();
+
+    // If qglview is in a layout, replace it
+    auto *layout = this->qglview->parentWidget()->layout();
+    if (layout) {
+      layout->replaceWidget(this->qglview, this->rtglview);
+    }
+
+    rtViewActive = true;
+  } else {
+    // Swap back
+    auto *layout = this->rtglview->parentWidget()->layout();
+    if (layout) {
+      layout->replaceWidget(this->rtglview, this->qglview);
+    }
+    this->rtglview->hide();
+    this->qglview->show();
+    this->qglview->setFocus();
+    rtViewActive = false;
+  }
 }
 
 bool MainWindow::isEmpty() { return activeEditor->toPlainText().isEmpty(); }
