@@ -24,6 +24,8 @@ public:
   void setRTTree(std::shared_ptr<RTCSGNode> root);
   Eigen::Matrix4f getViewMatrix(const Camera& cam);
 
+  void setColorScheme(const ColorScheme* cs);
+
 protected:
   void initializeGL() override;
   void resizeGL(int w, int h) override;
@@ -38,10 +40,23 @@ private:
   const Camera* openscadCam = nullptr;
   std::shared_ptr<RTCSGNode> rtRoot;
 
+  // Colorscheme
+  const ColorScheme* colorscheme = nullptr;
+
+  // axes and crosshair
+  void showAxes(const Color4f& col);
+  void showCrosshairs(const Color4f& col);
+  void showScalemarkers(const Color4f& col);
+  void showSmallaxes(const Color4f& col);
+  float getDPI();
+  void decodeMarkerValue(double i, double l, int size_div_sm);
+
   // GPU handles
   GLuint computeProgram = 0;
   GLuint quadProgram = 0;
+  GLuint depthCopyProgram = 0;
   GLuint outputTexture = 0;
+  GLuint depthTexture = 0;
   GLuint quadVAO = 0, quadVBO = 0;
   GLuint primitivesSSBO = 0;
   GLuint operationsSSBO = 0;

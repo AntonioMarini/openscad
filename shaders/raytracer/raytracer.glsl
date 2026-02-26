@@ -1,7 +1,12 @@
-#version 460 core
+#version 450 core
 
 layout (local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout (rgba32f, binding = 0) uniform image2D imgOutput;
+
+// depth texture: used for drawing things on top/behind later
+layout (rgba32f, binding = 1) uniform image2D depthOutput;
+uniform mat4 u_view;
+uniform mat4 u_proj;
 
 #define MAX_SPANS 3
 #define MAX_STACK 5
@@ -18,7 +23,6 @@ const uint OP_TYPE_OPDIFFERENCE = 4;
 const uint ID_OP_TYPE_PRIMITIVE = 0;
 const uint ID_OP_TYPE_OPERATION = 1;
 
-const vec3 BACKGROUND = vec3(0.5, 0.7, 1.0);
 const vec2 NO_HIT_SPAN = vec2(1.0/0.0, -1.0/0.0); // (inf, -inf)
 
 // UNIFORMS
@@ -29,6 +33,7 @@ uniform mat4 u_inv_view;
 uniform float fov;
 uniform float aspectRatio;
 uniform vec3 u_light_dir;
+uniform vec3 u_background;
 
 // STRUCTS
 struct Primitive {
@@ -312,7 +317,7 @@ bool get_bit(uvec2 mask, int bit) {
 }
 
 
-vec3 csg_span(ray r) {
+vec3 csg_span(ray r, ivec2 pixel_coords) {
     vec3 inv_ray_dir = 1.0 / (r.dir + vec3(1e-6));
     uint num_ops = commands.length();
     uint root_id = num_ops - 1;
@@ -320,7 +325,8 @@ vec3 csg_span(ray r) {
 
     // Early out: if ray misses root OBB, return background
     if (root_cmd.obb_skip == 1u || !intersect_obb(r.origin, r.dir, root_cmd.obb_inv_transform)) {
-        return BACKGROUND; 
+        imageStore(depthOutput, pixel_coords, vec4(1.0, 0.0, 0.0, 0.0));
+        return u_background;
     }
 
     // old skip mask
@@ -420,11 +426,22 @@ vec3 csg_span(ray r) {
         }
         if (best_idx != -1) {
             span hit = final_list.spans[best_idx];
+
+            vec3 hitPos = r.origin + r.dir * t;
+
+            // Write depth
+            vec4 clipPos = u_proj * u_view * vec4(hitPos, 1.0);
+            float depth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+            imageStore(depthOutput, pixel_coords, vec4(depth, 0.0, 0.0, 0.0));
             
-            return get_final_color(r.origin + r.dir * t, normalize(u_light_dir), primitives[hit.primitive_id], hit.invert_normal);
+            return get_final_color(hitPos, normalize(u_light_dir), primitives[hit.primitive_id], hit.invert_normal);
         }
     }
-    return BACKGROUND;
+
+    // No hit → background depth (1.0)
+    imageStore(depthOutput, pixel_coords, vec4(1.0, 0.0, 0.0, 0.0));
+
+    return u_background;
 }
 
 float hash(vec2 p) { return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x)))); }
@@ -450,7 +467,7 @@ void main() {
         r.origin = u_camera_pos;
         r.dir = rayDirWorld;
 
-        vec3 sample_color = csg_span(r);
+        vec3 sample_color = csg_span(r, pixel_coords);
 
         if (u_rendering_mode == 1) {
             float wire = 0.0;
