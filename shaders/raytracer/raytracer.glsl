@@ -8,8 +8,11 @@ layout (rgba32f, binding = 1) uniform image2D depthOutput;
 uniform mat4 u_view;
 uniform mat4 u_proj;
 
-#define MAX_SPANS 3
-#define MAX_STACK 5
+#define MAX_SPANS 8
+#define MAX_STACK 32
+#define MAX_COMMANDS 1024
+#define MASK_WORDS (MAX_COMMANDS / 32)
+#define STACK_MASK_WORDS (MAX_STACK / 32 + 1)
 
 // CONSTANTS
 const uint PRIMITIVE_TYPE_SPHERE = 1;
@@ -34,6 +37,8 @@ uniform float fov;
 uniform float aspectRatio;
 uniform vec3 u_light_dir;
 uniform vec3 u_background;
+
+uniform int u_use_obb;
 
 // STRUCTS
 struct Primitive {
@@ -306,16 +311,25 @@ interval_list make_primitive_interval(vec2 span, uint id) {
     return list;
 }
 
-void set_bit(inout uvec2 mask, int bit) {
-    if (bit < 32) mask.x |= (1u << bit);
-    else          mask.y |= (1u << (bit - 32));
+void set_bit(inout uint mask[MASK_WORDS], int bit) {
+    mask[bit / 32] |= (1u << (bit % 32));
 }
 
-bool get_bit(uvec2 mask, int bit) {
-    if (bit < 32) return (mask.x & (1u << bit)) != 0u;
-    else          return (mask.y & (1u << (bit - 32))) != 0u;
+bool get_bit(uint mask[MASK_WORDS], int bit) {
+    return (mask[bit / 32] & (1u << (bit % 32))) != 0u;
 }
 
+void set_stack_bit(inout uint mask[STACK_MASK_WORDS], int bit) {
+    mask[bit / 32] |= (1u << (bit % 32));
+}
+
+void clear_stack_bit(inout uint mask[STACK_MASK_WORDS], int bit) {
+    mask[bit / 32] &= ~(1u << (bit % 32));
+}
+
+bool get_stack_bit(uint mask[STACK_MASK_WORDS], int bit) {
+    return (mask[bit / 32] & (1u << (bit % 32))) != 0u;
+}
 
 vec3 csg_span(ray r, ivec2 pixel_coords) {
     vec3 inv_ray_dir = 1.0 / (r.dir + vec3(1e-6));
@@ -323,28 +337,34 @@ vec3 csg_span(ray r, ivec2 pixel_coords) {
     uint root_id = num_ops - 1;
     CSGCommand root_cmd = commands[root_id];
 
-    // Early out: if ray misses root OBB, return background
-    if (root_cmd.obb_skip == 1u || !intersect_obb(r.origin, r.dir, root_cmd.obb_inv_transform)) {
-        imageStore(depthOutput, pixel_coords, vec4(1.0, 0.0, 0.0, 0.0));
-        return u_background;
+    if (u_use_obb == 1) {
+        // Early out: if ray misses root OBB, return background
+        if (root_cmd.obb_skip == 1u || !intersect_obb(r.origin, r.dir, root_cmd.obb_inv_transform)) {
+            imageStore(depthOutput, pixel_coords, vec4(1.0, 0.0, 0.0, 0.0));
+            return u_background;
+        }
     }
 
     // old skip mask
     //bool skip_mask[MAX_COMMANDS];
     //for (uint i = 0; i < num_ops; i++) skip_mask[i] = false;
 
-   uvec2 skip_mask = uvec2(0);
+   uint skip_mask[MASK_WORDS];
+   for (int i = 0; i < MASK_WORDS; i++) skip_mask[i] = 0u;
+
     // First pass: determine which commands to skip based on AABB intersection
     // iterate inverse order: root -> leaves
-    for(int i = int(num_ops) -1; i>=0; i--) {
-       if (get_bit(skip_mask, i)) continue;
+    if(u_use_obb == 1){
+        for (int i = int(num_ops) -1; i>=0; i--) {
+            if (get_bit(skip_mask, i)) continue;
 
-        CSGCommand cmd = commands[i];
-        if (cmd.obb_skip == 1u || !intersect_obb(r.origin, r.dir, cmd.obb_inv_transform)) {
-            // Mark children to skip
-            uint skip_count = cmd.skip_children;
-            for(int j = 0; j < int(skip_count); j++) {
-                if(i - j >= 0) set_bit(skip_mask, i - j);  
+            CSGCommand cmd = commands[i];
+            if (cmd.obb_skip == 1u || !intersect_obb(r.origin, r.dir, cmd.obb_inv_transform)) {
+                // Mark children to skip
+                uint skip_count = cmd.skip_children;
+                for (int j = 0; j < int(skip_count); j++) {
+                    if (i - j >= 0) set_bit(skip_mask, i - j);
+                }
             }
         }
     }
@@ -352,7 +372,8 @@ vec3 csg_span(ray r, ivec2 pixel_coords) {
     // Second pass: process commands, skipping those marked
     // iterate normal order: leaves -> root
     interval_list stack[MAX_STACK];
-    uint stack_has_data = 0u; // bitmask that is used for early exit in operations
+    uint stack_has_data[STACK_MASK_WORDS];
+    for (int i = 0; i < STACK_MASK_WORDS; i++) stack_has_data[i] = 0u;
     int sp = 0;
 
     for (uint i = 0; i < num_ops; i++) {
@@ -362,7 +383,7 @@ vec3 csg_span(ray r, ivec2 pixel_coords) {
 
         if (command.type == ID_OP_TYPE_PRIMITIVE) {
              if (is_skipped) {
-                stack_has_data &= ~(1u << sp);
+                clear_stack_bit(stack_has_data, sp);
                 sp++;            
              }else{
                 Primitive p = primitives[command.id];
@@ -380,22 +401,23 @@ vec3 csg_span(ray r, ivec2 pixel_coords) {
                     stack[sp].spans[0].interval = hit;
                     stack[sp].spans[0].primitive_id = command.id;
                     stack[sp].spans[0].invert_normal = false;
-                    
-                    stack_has_data |= (1u << sp); 
-                    } else {
-                    stack_has_data &= ~(1u << sp);                }
+
+                    set_stack_bit(stack_has_data, sp);
+                } else {
+                    clear_stack_bit(stack_has_data, sp);
+                }
                 sp++;            
             }
         } else {
             sp--; 
-            bool has_op2 = (stack_has_data & (1u << sp)) != 0u;
+            bool has_op2 = get_stack_bit(stack_has_data, sp);
                         
             sp--;
-            bool has_op1 = (stack_has_data & (1u << sp)) != 0u;
+            bool has_op1 = get_stack_bit(stack_has_data, sp);
 
              if (is_skipped || (!has_op1  && !has_op2 && command.type != OP_TYPE_OPUNION)) {
                 // if both children empty and not an union -> result is empty
-                stack_has_data &= ~(1u << sp); // update mask for this sp to 0
+                clear_stack_bit(stack_has_data, sp); // update mask for this sp to 0
                 sp++;
             }else {
                 interval_list op2_val; op2_val.count = 0;
@@ -408,8 +430,8 @@ vec3 csg_span(ray r, ivec2 pixel_coords) {
                 stack[sp] = merge_spans(op1_val, op2_val, operations[command.id].type);
                 
                 //finally update the stack_has_data bitmask               
-                if(stack[sp].count > 0) stack_has_data |= (1u << sp);
-                else stack_has_data &= ~(1u << sp);
+                if(stack[sp].count > 0) set_stack_bit(stack_has_data, sp);
+                else clear_stack_bit(stack_has_data, sp);
                 
                 sp++;            }
         }

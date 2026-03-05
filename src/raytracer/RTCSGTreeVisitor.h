@@ -23,11 +23,18 @@ public:
   Response visit(State& state, const TransformNode& node) override;
   Response visit(State& state, const ColorNode& node) override;
 
+
+  std::shared_ptr<RTCSGNode> binarizeNaive(
+    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op);
+  std::shared_ptr<RTCSGNode> binarizeBVH(std::vector<std::shared_ptr<RTCSGNode>>& children,
+                                         OperationType op);
   // Entry point — same pattern as CSGTreeEvaluator::buildCSGTree
   std::shared_ptr<RTCSGNode> buildRTTree(const AbstractNode& node);
 
   // Getter for the result
   std::shared_ptr<RTCSGNode> getRootNode() const { return rootNode; }
+
+  static Eigen::Vector3f getCentroid(const std::shared_ptr<RTCSGNode>& node);
 
   ~RTCSGTreeVisitor() override = default;
 

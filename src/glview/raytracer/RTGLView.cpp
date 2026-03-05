@@ -3,6 +3,7 @@
 
 #include "glview/hershey.h"
 
+#include <QApplication>
 #include <QKeyEvent>
 #include <iostream>
 #include <string>
@@ -35,6 +36,7 @@ RTGLView::~RTGLView() {
 }
 
 void RTGLView::setRTTree(std::shared_ptr<RTCSGNode> root) {
+  std::cout << "[RT] setRTTree called, root=" << (root != nullptr) << std::endl;
     this->rtRoot = root;
     this->needsRebuild = true;
     update();  // trigger repaint
@@ -150,6 +152,15 @@ Eigen::Matrix4f RTGLView::getViewMatrix(const Camera& cam) {
 }
 
 void RTGLView::paintGL() {
+  frameCount++;
+  if (frameCount == 1) fpsTimer.start();
+  if (fpsTimer.elapsed() >= 1000) {
+    currentFps = frameCount * 1000.0f / fpsTimer.elapsed();
+    std::cout << "[RT] FPS: " << currentFps << std::endl;
+    frameCount = 0;
+    fpsTimer.restart();
+  }
+
     if (!initialized || !rtRoot) return;
 
     const int w = width() * devicePixelRatio();
@@ -167,8 +178,9 @@ void RTGLView::paintGL() {
     glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
     glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
     glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), 0.5f, 1.0f, 0.5f);
-    glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 8);
+    glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 4);
     glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 0);
+    glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
 
     if (colorscheme) {
       Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
@@ -278,6 +290,9 @@ void RTGLView::paintGL() {
     glDisable(GL_DEPTH_TEST);
     showSmallaxes(axesColor);
     glEnable(GL_DEPTH_TEST);
+
+    glFinish();
+  update();
 }
 
 void RTGLView::setCamera(const Camera* cam) {
@@ -306,6 +321,8 @@ void RTGLView::rebuildGPUData() {
     if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
     if (commandsSSBO)   glDeleteBuffers(1, &commandsSSBO);
 
+  glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
     // Create new SSBOs
     auto createSSBO = [](GLuint& id, size_t size, const void* data, GLuint binding) {
         glGenBuffers(1, &id);
@@ -318,6 +335,8 @@ void RTGLView::rebuildGPUData() {
     createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
     createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
     createSSBO(commandsSSBO,   gpuCommands.size() * sizeof(CSGCommand), gpuCommands.data(), 3);
+
+  glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
 // ---- Shader compilation helpers ----
@@ -665,3 +684,87 @@ void RTGLView::keyPressEvent(QKeyEvent *event) {
     }
     update();  // trigger repaint
 }
+
+void RTGLView::setQGLView(QGLView* view) {
+  this->qglview = view;
+  connect(qglview, &QGLView::cameraChanged, this, QOverload<>::of(&QOpenGLWidget::update));
+}
+
+// Mouse events
+void RTGLView::mousePressEvent(QMouseEvent *event)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  lastMousePos = event->globalPosition();
+#else
+  lastMousePos = event->globalPos();
+#endif
+  this->mouse_drag_active = true;
+}
+
+void RTGLView::mouseMoveEvent(QMouseEvent *event)
+{
+  if (!qglview || !mouse_drag_active) return;
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  auto thisPos = event->globalPosition();
+#else
+  auto thisPos = event->globalPos();
+#endif
+
+  double dx = (thisPos.x() - lastMousePos.x()) * 0.7;
+  double dy = (thisPos.y() - lastMousePos.y()) * 0.7;
+
+  // Determine button
+  int buttonIndex = -1;
+  bool multipleButtons = false;
+  if (event->buttons() & Qt::LeftButton) buttonIndex = 0;
+  if (event->buttons() & Qt::MiddleButton) {
+    if (buttonIndex != -1) multipleButtons = true;
+    else buttonIndex = 1;
+  }
+  if (event->buttons() & Qt::RightButton) {
+    if (buttonIndex != -1) multipleButtons = true;
+    else buttonIndex = 2;
+  }
+
+  // Determine modifier
+  int modifierIndex = 0;
+  if (QApplication::keyboardModifiers() & Qt::ShiftModifier) modifierIndex = 1;
+  if (QApplication::keyboardModifiers() & Qt::ControlModifier) {
+    modifierIndex = (modifierIndex == 1) ? 3 : 2;
+  }
+
+  if (buttonIndex != -1 && !multipleButtons) {
+    // Rotation
+    double rx = dx, ry = dy, rz = 0;
+    if (buttonIndex == 0 && modifierIndex == 0) {
+      qglview->rotate(dy, dx, 0, true);
+    }
+    // Translation
+    else if (buttonIndex == 2 && modifierIndex == 0) {
+      double zoom = qglview->cam.zoomValue();
+      double mx = (dx / width()) * 3.0 * zoom;
+      double mz = (dy / height()) * 3.0 * zoom;
+      qglview->translate(mx, 0, mz, true);
+    }
+  }
+
+  lastMousePos = thisPos;
+}
+void RTGLView::mouseReleaseEvent(QMouseEvent *event)
+{
+  Q_UNUSED(event);
+  this->mouse_drag_active = false;
+}
+
+void RTGLView::mouseDoubleClickEvent(QMouseEvent *event) {
+  Q_UNUSED(event);
+}
+
+void RTGLView::wheelEvent(QWheelEvent *event)
+{
+  if (!qglview) return;
+  int delta = event->angleDelta().y();
+  qglview->zoom(delta, true);
+}
+

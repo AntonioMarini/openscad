@@ -260,7 +260,7 @@ OBB OBB::buildOperationOBB(OperationType optype, const OBB& leftOBB, const OBB& 
     aabbMat.col(3).head<3>() = aabb_center;
 
     // keep the tighter one
-    if (aabb_volume <= obb_volume) {
+    if (aabb_volume <= obb_volume || true) {
         resultOBB.inv_transform = aabbMat.inverse();
     } else {
         resultOBB.inv_transform = obbMat.inverse();

@@ -10,6 +10,8 @@
 #include "core/TransformNode.h"
 #include "core/primitives.h"
 
+#include <algorithm>
+
 static float deg2rad(float deg) { return deg * (3.14159265359f / 180.0f); }
 
 static OperationType mapOperator(OpenSCADOperator op) {
@@ -19,6 +21,29 @@ static OperationType mapOperator(OpenSCADOperator op) {
   case OpenSCADOperator::DIFFERENCE:   return OperationType::DIFFERENCE;
   default:                             return OperationType::NONE;
   }
+}
+
+// ---- Naive balanced binarization ----
+// Splits the children list in half recursively without any spatial ordering.
+// Produces a balanced binary tree (log2 depth) instead of a linear chain.
+
+std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeNaive(
+    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op)
+{
+    if (children.empty()) return nullptr;
+    if (children.size() == 1) return children[0];
+    if (children.size() == 2) {
+        return std::make_shared<RTCSGNode>(op, children[0], children[1]);
+    }
+
+    size_t mid = children.size() / 2;
+    std::vector<std::shared_ptr<RTCSGNode>> left(children.begin(), children.begin() + mid);
+    std::vector<std::shared_ptr<RTCSGNode>> right(children.begin() + mid, children.end());
+
+    auto leftNode = binarizeNaive(left, op);
+    auto rightNode = binarizeNaive(right, op);
+
+    return std::make_shared<RTCSGNode>(op, leftNode, rightNode);
 }
 
 // ---- Entry point ----
@@ -36,7 +61,8 @@ void RTCSGTreeVisitor::addToParent(const State& state, const AbstractNode& node)
   }
 }
 
-// binarize the children
+// Binarize children: uses naive balanced split for commutative ops
+// (union, intersection), and keeps first child fixed for difference.
 void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, OperationType op) {
   const auto& vc = this->visitedchildren[node.index()];
 
@@ -45,23 +71,46 @@ void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, O
     return;
   }
 
-  std::shared_ptr<RTCSGNode> t1 = nullptr;
-
+  // Collect all valid RTCSGNode children
+  std::vector<std::shared_ptr<RTCSGNode>> validChildren;
   for (const auto& chnode : vc) {
     auto it = this->stored_term.find(chnode->index());
-    std::shared_ptr<RTCSGNode> t2 = (it != stored_term.end()) ? it->second : nullptr;
+    std::shared_ptr<RTCSGNode> t = (it != stored_term.end()) ? it->second : nullptr;
     this->stored_term.erase(chnode->index());
-
-    if (t2 && !t1) {
-      t1 = t2;  // first valid child
-    } else if (t2 && t1) {
-      // Binarize: combine t1 and t2
-      auto combined = std::make_shared<RTCSGNode>(op, t1, t2);
-      t1 = combined;
-    }
+    if (t) validChildren.push_back(t);
   }
 
-  this->stored_term[node.index()] = t1;
+  if (validChildren.empty()) {
+    this->stored_term[node.index()] = nullptr;
+    return;
+  }
+
+  if (validChildren.size() == 1) {
+    this->stored_term[node.index()] = validChildren[0];
+    return;
+  }
+
+  if (op == OperationType::DIFFERENCE) {
+    // Difference is NOT commutative: first child is the base,
+    // the rest are subtracted.
+    auto base = validChildren[0];
+
+    if (validChildren.size() == 2) {
+      this->stored_term[node.index()] = std::make_shared<RTCSGNode>(op, base, validChildren[1]);
+      return;
+    }
+
+    // The subtracted children (index 1..N-1) are combined as a union,
+    // then subtracted from the base.
+    std::vector<std::shared_ptr<RTCSGNode>> subtracted(
+        validChildren.begin() + 1, validChildren.end());
+    auto subtractedTree = binarizeNaive(subtracted, OperationType::UNION);
+
+    this->stored_term[node.index()] = std::make_shared<RTCSGNode>(op, base, subtractedTree);
+  } else {
+    // Union and Intersection are commutative: naive balanced binarization
+    this->stored_term[node.index()] = binarizeNaive(validChildren, op);
+  }
 }
 
 // ---- AbstractNode (fallback): treat as union of children ----
@@ -85,12 +134,10 @@ Response RTCSGTreeVisitor::visit(State& state, const ColorNode& node)
   return Response::ContinueTraversal;
 }
 
-
-
 Response RTCSGTreeVisitor::visit(State& state, const TransformNode& node)
 {
   if (state.isPrefix()) {
-    state.setMatrix(state.matrix() * node.matrix); // build up the transform matrix with previous nodes one
+    state.setMatrix(state.matrix() * node.matrix);
   }
   if (state.isPostfix()) {
     applyToChildren(state, node, OperationType::UNION);
@@ -102,9 +149,8 @@ Response RTCSGTreeVisitor::visit(State& state, const TransformNode& node)
 Response RTCSGTreeVisitor::visit(State& state, const CsgOpNode& node)
 {
   if (state.isPostfix()) {
-    const OperationType rtOp = mapOperator(node.type); // translate openscad op type to rt op type
+    const OperationType rtOp = mapOperator(node.type);
     if (rtOp == OperationType::NONE) {
-      // Unsupported op (minkowski, hull, etc.), skip for now, and treat like union instead
       applyToChildren(state, node, OperationType::UNION);
     } else {
       applyToChildren(state, node, rtOp);
@@ -122,7 +168,7 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node) {
         Eigen::Matrix4f worldMat = state.matrix().matrix().cast<float>();
 
         // Color from State
-        Eigen::Vector3f col(0.8f, 0.8f, 0.8f);  // default
+        Eigen::Vector3f col(0.8f, 0.8f, 0.8f);
         if (state.color().isValid()) {
             auto stateColor = state.color();
             col = Eigen::Vector3f(static_cast<float>(stateColor.r()), static_cast<float>(stateColor.g()), static_cast<float>(stateColor.b()));
@@ -132,7 +178,6 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node) {
             rtNode = std::make_shared<RTCSGNode>(PrimitiveType::CUBE);
             rtNode->color = col;
 
-            // Local transform: scale by size
             Eigen::Vector3f size(cube->x, cube->y, cube->z);
             Eigen::Matrix4f local = Eigen::Matrix4f::Identity();
             local = (Eigen::Affine3f(local) * Eigen::Scaling(size)).matrix();
@@ -167,8 +212,6 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node) {
                 local = (Eigen::Affine3f(local) * Eigen::Translation3f(0.0f, 0.5f, 0.0f)).matrix();
             }
 
-            // OpenSCAD cylinders are along Z, your raytracer expects Y-axis
-            // Rotate 90° around X to match your convention
             Eigen::AngleAxisf toYaxis(deg2rad(90.0f), Eigen::Vector3f::UnitX());
             local = (Eigen::Affine3f(toYaxis) * Eigen::Affine3f(local)).matrix();
 

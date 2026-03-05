@@ -1,7 +1,9 @@
 #pragma once
 
 #include "glview/system-gl.h"
+
 #include "gui/MouseSelector.h"
+#include "gui/QGLView.h"
 
 #include <QWheelEvent>
 #include <QtGlobal>
@@ -12,6 +14,8 @@
 
 #include "raytracer/RTCSGNode.h"
 
+#include <QElapsedTimer>
+
 class RTGLView : public QOpenGLWidget
 {
   Q_OBJECT
@@ -19,6 +23,10 @@ class RTGLView : public QOpenGLWidget
 public:
   explicit RTGLView(QWidget *parent = nullptr);
   ~RTGLView() override;
+
+  void setQGLView(QGLView* view);
+
+  bool mouse_drag_active = false;
 
   void setCamera(const Camera* cam);
   void setRTTree(std::shared_ptr<RTCSGNode> root);
@@ -36,6 +44,19 @@ private:
   void rebuildGPUData();
   GLuint compileComputeShader(const std::string& source);
   GLuint compileQuadShader(const std::string& vertSrc, const std::string& fragSrc);
+
+  QElapsedTimer fpsTimer;
+  int frameCount = 0;
+  float currentFps = 0.0f;
+
+  QGLView* qglview = nullptr;
+  QPointF lastMousePos;
+
+  void wheelEvent(QWheelEvent *event) override;
+  void mousePressEvent(QMouseEvent *event) override;
+  void mouseMoveEvent(QMouseEvent *event) override;
+  void mouseReleaseEvent(QMouseEvent *event) override;
+  void mouseDoubleClickEvent(QMouseEvent *event) override;
 
   const Camera* openscadCam = nullptr;
   std::shared_ptr<RTCSGNode> rtRoot;

@@ -3116,6 +3116,7 @@ void MainWindow::viewModeRaytracer()
   if (!this->rtglview) {
     // Create the RT widget, parented to the same container as qglview
     this->rtglview = new RTGLView(this->qglview->parentWidget());
+    this->rtglview->setQGLView(this->qglview);
     this->rtglview->setCamera(&this->qglview->cam);
     this->rtglview->setColorScheme(this->qglview->colorscheme);
   }
