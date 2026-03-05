@@ -168,7 +168,7 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node) {
         Eigen::Matrix4f worldMat = state.matrix().matrix().cast<float>();
 
         // Color from State
-        Eigen::Vector3f col(0.8f, 0.8f, 0.8f);
+      Eigen::Vector3f col = defaultColor;
         if (state.color().isValid()) {
             auto stateColor = state.color();
             col = Eigen::Vector3f(static_cast<float>(stateColor.r()), static_cast<float>(stateColor.g()), static_cast<float>(stateColor.b()));

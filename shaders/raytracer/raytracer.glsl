@@ -37,6 +37,7 @@ uniform float fov;
 uniform float aspectRatio;
 uniform vec3 u_light_dir;
 uniform vec3 u_background;
+uniform vec3 u_default_mat_color;
 
 uniform int u_use_obb;
 

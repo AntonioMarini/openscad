@@ -36,6 +36,9 @@ public:
 
   static Eigen::Vector3f getCentroid(const std::shared_ptr<RTCSGNode>& node);
 
+  Eigen::Vector3f defaultColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
+  void setDefaultColor(const Eigen::Vector3f& col) { defaultColor = col; }
+
   ~RTCSGTreeVisitor() override = default;
 
 private:

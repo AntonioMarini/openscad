@@ -24,6 +24,8 @@ public:
   explicit RTGLView(QWidget *parent = nullptr);
   ~RTGLView() override;
 
+  bool needsRebuild = true;
+
   void setQGLView(QGLView* view);
 
   bool mouse_drag_active = false;
@@ -84,7 +86,6 @@ private:
   GLuint commandsSSBO = 0;
 
   bool initialized = false;
-  bool needsRebuild = true;
 
   // Camera (simple for now)
   Eigen::Vector3f camPos{0.0f, 0.0f, 3.0f};

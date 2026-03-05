@@ -1474,6 +1474,8 @@ void MainWindow::compileCSG()
 #endif
 
     RTCSGTreeVisitor rtVisitor;
+    Color4f defaultMatColor = ColorMap::getColor(*this->qglview->colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
+    rtVisitor.setDefaultColor(Eigen::Vector3f(defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b()));
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root()); // Tree for raytracing view
    if (this->rtglview) {
     this->rtglview->setRTTree(this->rtRoot);
@@ -3122,8 +3124,12 @@ void MainWindow::viewModeRaytracer()
   }
 
   if (!rtViewActive) {
+
+
     // Swap: hide OpenCSG view, show RT view in same position
     this->rtglview->setGeometry(this->qglview->geometry());
+    this->rtglview->makeCurrent();
+    this->rtglview->needsRebuild = true;
     this->rtglview->setRTTree(this->rtRoot);
     this->qglview->hide();
     this->rtglview->show();

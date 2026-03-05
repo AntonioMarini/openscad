@@ -8,7 +8,6 @@
 #include <iostream>
 #include <string>
 
-
 static std::string loadShaderFile(const std::string& path) {
     QFile file(QString::fromStdString(path));
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -177,16 +176,20 @@ void RTGLView::paintGL() {
     float aspectRatio = (float)w / (float)h;
     glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
     glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
-    glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), 0.5f, 1.0f, 0.5f);
+    glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
     glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 4);
     glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 0);
     glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
 
     if (colorscheme) {
       Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
+      Color4f defaultMatColor = ColorMap::getColor(*colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
+
       glUniform3f(glGetUniformLocation(computeProgram, "u_background"), bg.r(), bg.g(), bg.b());
+      glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b());
     } else {
       glUniform3f(glGetUniformLocation(computeProgram, "u_background"), 0.5f, 0.7f, 1.0f);
+      glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), 1.0f, 1.0f, 1.0f); // White fallback
     }
 
     Eigen::Matrix4f view = getViewMatrix(*openscadCam);
@@ -241,7 +244,6 @@ void RTGLView::paintGL() {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
-    // ---- Copy depth texture into GL depth buffer ----
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_ALWAYS);
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
@@ -259,7 +261,7 @@ void RTGLView::paintGL() {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthFunc(GL_LESS);
 
-    // ---- Draw axes with depth test (go behind objects) ----
+    // Draw axes with depth test
     glUseProgram(0);
     glBindTexture(GL_TEXTURE_2D, 0);
 
