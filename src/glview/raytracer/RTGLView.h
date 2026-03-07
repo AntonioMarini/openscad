@@ -16,6 +16,12 @@
 
 #include <QElapsedTimer>
 
+/***
+ * Class responsible for handling and viewing, in a QT widget, the RT CSG Tree.
+ *
+ * This takes lot of duplicate code from QGLView.cc (Openscad preview widget), should be refactored to be a cleaner solution.
+ *
+ */
 class RTGLView : public QOpenGLWidget
 {
   Q_OBJECT
@@ -24,16 +30,17 @@ public:
   explicit RTGLView(QWidget *parent = nullptr);
   ~RTGLView() override;
 
+  // used for re trigger the flattening of the tree -> passing the new data to the gpu again
   bool needsRebuild = true;
 
-  void setQGLView(QGLView* view);
+  void setQGLView(QGLView* view); // temporary solution to pick camera and other things from the openscad main preview widget
 
   bool mouse_drag_active = false;
 
   void setCamera(const Camera* cam);
   void setRTTree(std::shared_ptr<RTCSGNode> root);
-  Eigen::Matrix4f getViewMatrix(const Camera& cam);
 
+  Eigen::Matrix4f getViewMatrix(const Camera& cam);
   void setColorScheme(const ColorScheme* cs);
 
 protected:

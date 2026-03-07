@@ -122,8 +122,8 @@ public:
         CSGCommand cmd(CSGCommandType::OPERATION, op_id);
         cmd.obb = OBB::buildOperationOBB(node->op, commands[left_id].obb, commands[right_id].obb);
 
-		// add skip children (itself + left + right)
-		cmd.skip_children = 1 + commands[left_id].skip_children + commands[right_id].skip_children;
+        // add skip children (itself + left + right)
+        cmd.skip_children = 1 + commands[left_id].skip_children + commands[right_id].skip_children;
 
         unsigned int cmd_id = (unsigned int)commands.size();
         commands.push_back(cmd);

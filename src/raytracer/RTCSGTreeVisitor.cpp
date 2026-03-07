@@ -23,10 +23,8 @@ static OperationType mapOperator(OpenSCADOperator op) {
   }
 }
 
-// ---- Naive balanced binarization ----
-// Splits the children list in half recursively without any spatial ordering.
-// Produces a balanced binary tree (log2 depth) instead of a linear chain.
-
+// Balanced Binarization: TODO should
+// Splits the children list in half recursevely.
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeNaive(
     std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op)
 {
@@ -62,7 +60,6 @@ void RTCSGTreeVisitor::addToParent(const State& state, const AbstractNode& node)
 }
 
 // Binarize children: uses naive balanced split for commutative ops
-// (union, intersection), and keeps first child fixed for difference.
 void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, OperationType op) {
   const auto& vc = this->visitedchildren[node.index()];
 
@@ -108,7 +105,7 @@ void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, O
 
     this->stored_term[node.index()] = std::make_shared<RTCSGNode>(op, base, subtractedTree);
   } else {
-    // Union and Intersection are commutative: naive balanced binarization
+    // Union and Intersection are commutative -> balanced binarization
     this->stored_term[node.index()] = binarizeNaive(validChildren, op);
   }
 }
@@ -167,8 +164,7 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node) {
         // Accumulated transform from State (double -> float)
         Eigen::Matrix4f worldMat = state.matrix().matrix().cast<float>();
 
-        // Color from State
-      Eigen::Vector3f col = defaultColor;
+      Eigen::Vector3f col = defaultColor; // default color set same as openscad
         if (state.color().isValid()) {
             auto stateColor = state.color();
             col = Eigen::Vector3f(static_cast<float>(stateColor.r()), static_cast<float>(stateColor.g()), static_cast<float>(stateColor.b()));

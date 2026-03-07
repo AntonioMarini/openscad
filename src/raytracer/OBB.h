@@ -15,6 +15,7 @@ struct alignas(16) OBB {
 
     OBB() : inv_transform(Eigen::Matrix4f::Identity()){
         _pad[0] = _pad[1] = _pad[2] = 0;
+        skip = 0;
     }
 
     float getVolume() const;

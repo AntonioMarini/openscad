@@ -5,11 +5,12 @@ layout (rgba32f, binding = 0) uniform image2D imgOutput;
 
 // depth texture: used for drawing things on top/behind later
 layout (rgba32f, binding = 1) uniform image2D depthOutput;
+
 uniform mat4 u_view;
 uniform mat4 u_proj;
 
-#define MAX_SPANS 8
-#define MAX_STACK 32
+#define MAX_SPANS 16
+#define MAX_STACK 8
 #define MAX_COMMANDS 1024
 #define MASK_WORDS (MAX_COMMANDS / 32)
 #define STACK_MASK_WORDS (MAX_STACK / 32 + 1)
@@ -357,7 +358,7 @@ vec3 csg_span(ray r, ivec2 pixel_coords) {
     // iterate inverse order: root -> leaves
     if(u_use_obb == 1){
         for (int i = int(num_ops) -1; i>=0; i--) {
-            if (get_bit(skip_mask, i)) continue;
+          if (get_bit(skip_mask, i)) continue;
 
             CSGCommand cmd = commands[i];
             if (cmd.obb_skip == 1u || !intersect_obb(r.origin, r.dir, cmd.obb_inv_transform)) {

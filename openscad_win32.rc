@@ -1,0 +1,45 @@
+# if defined(UNDER_CE)
+#  include <winbase.h>
+# else
+#  include <winver.h>
+# endif
+
+#include "winuser.h"
+1 RT_MANIFEST "scripts/winmanifest.xml"
+
+VS_VERSION_INFO VERSIONINFO
+	FILEVERSION 2026,3,5,0
+	PRODUCTVERSION 2026,3,5,0
+	FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+	FILEFLAGS VS_FF_DEBUG
+#else
+	FILEFLAGS 0x0L
+#endif
+	FILEOS VOS_NT
+	FILETYPE VFT_APP
+	FILESUBTYPE 0x0L
+	BEGIN
+		BLOCK "StringFileInfo"
+		BEGIN
+			BLOCK "040904E4"
+			BEGIN
+				VALUE "CompanyName", "The OpenSCAD Project\0"
+				VALUE "FileDescription", "OpenSCAD Application\0"
+				VALUE "FileVersion", "2026.03.05\0"
+				VALUE "InternalName", "openscad\0"
+				VALUE "LegalCopyright", "Copyright (C) 2009-2024 The OpenSCAD Developers\0"
+				VALUE "OriginalFilename", "openscad.exe\0"
+				VALUE "ProductName", "OpenSCAD\0"
+				VALUE "ProductVersion", "2026.03.05\0"
+			END
+		END
+		BLOCK "VarFileInfo"
+		BEGIN
+			VALUE "Translation", 0x409, 1252
+		END
+	END
+/* End of Version info */
+
+IDI_ICON1   ICON    DISCARDABLE "resources/icons/openscad.ico"
+IDI_ICON2   ICON    DISCARDABLE "resources/icons/openscad_doc.ico"

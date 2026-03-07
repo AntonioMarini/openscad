@@ -116,6 +116,7 @@ OBB OBB::buildPrimitiveOBB(const RTCSGNode& node) {
     obb_mat.col(3).head<3>() = center;
 
     OBB obb;
+    obb.skip = 0;
     obb.inv_transform = obb_mat.inverse();
     return obb;
 }
@@ -124,6 +125,7 @@ OBB OBB::buildOperationOBB(OperationType optype, const OBB& leftOBB, const OBB& 
     auto leftChildCorners = leftOBB.getCorners();
     auto rightChildCorners = rightOBB.getCorners();
     OBB resultOBB;
+    resultOBB.skip = 0;
     std::vector<Eigen::Vector3f> selectedCorners;
     switch (optype) {
         case OperationType::NONE:
@@ -260,7 +262,7 @@ OBB OBB::buildOperationOBB(OperationType optype, const OBB& leftOBB, const OBB& 
     aabbMat.col(3).head<3>() = aabb_center;
 
     // keep the tighter one
-    if (aabb_volume <= obb_volume || true) {
+    if (aabb_volume <= obb_volume) {
         resultOBB.inv_transform = aabbMat.inverse();
     } else {
         resultOBB.inv_transform = obbMat.inverse();

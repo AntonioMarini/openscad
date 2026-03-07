@@ -1,0 +1,5 @@
+-I/home/apollyon/Dev/openscad
+-I/home/apollyon/Dev/openscad
+-o
+/home/apollyon/Dev/openscad/openscad_interface.moc
+/home/apollyon/Dev/openscad/openscad_interface.h

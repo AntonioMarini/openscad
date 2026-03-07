@@ -1,0 +1,5 @@
+if(EXISTS "/home/apollyon/Dev/openscad/OpenSCADUnitTests-b12d07c_tests.cmake")
+  include("/home/apollyon/Dev/openscad/OpenSCADUnitTests-b12d07c_tests.cmake")
+else()
+  add_test(OpenSCADUnitTests_NOT_BUILT-b12d07c OpenSCADUnitTests_NOT_BUILT-b12d07c)
+endif()
