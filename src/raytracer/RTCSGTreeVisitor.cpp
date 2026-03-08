@@ -44,6 +44,44 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeNaive(
     return std::make_shared<RTCSGNode>(op, leftNode, rightNode);
 }
 
+Eigen::Vector3f RTCSGTreeVisitor::getCentroid(const std::shared_ptr<RTCSGNode>& node) {
+  if (!node) return Eigen::Vector3f::Zero();
+  if (node->is_leaf()) {
+    return node->transform.col(3).head<3>();
+  }
+  Eigen::Vector3f left = getCentroid(node->left);
+  Eigen::Vector3f right = getCentroid(node->right);
+  return (left + right) * 0.5f;
+}
+
+std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
+    std::vector<std::shared_ptr<RTCSGNode>>& children,
+    OperationType op, int depth = 0)
+{
+  if (children.size() == 1) return children[0];
+  if (children.size() == 2)
+    return std::make_shared<RTCSGNode>(op, children[0], children[1]);
+
+  int axis = depth % 3;
+
+  // Ordina per centroide lungo l'asse scelto
+    std::sort(children.begin(), children.end(),
+      [&](const auto& a, const auto& b) {
+
+          return getCentroid(a)[axis] < getCentroid(b)[axis];
+      });
+
+  size_t mid = children.size() / 2;
+  std::vector<std::shared_ptr<RTCSGNode>> left(children.begin(), children.begin() + mid);
+  std::vector<std::shared_ptr<RTCSGNode>> right(children.begin() + mid, children.end());
+
+  return std::make_shared<RTCSGNode>(op,
+      binarizeKD(left, op, depth + 1),
+      binarizeKD(right, op, depth + 1));
+}
+
+
+
 // ---- Entry point ----
 
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::buildRTTree(const AbstractNode& node) {
@@ -221,4 +259,84 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node) {
         addToParent(state, node);
     }
     return Response::ContinueTraversal;
+}
+
+std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr<RTCSGNode> node)
+{
+  if (node == nullptr) {
+    return nullptr;
+  }
+  // base case
+  if (node->is_leaf()) {
+    return node;
+  }
+
+  // rec (postorder visit)
+  node->left = distributeOperation(node->left);
+  node->right = distributeOperation(node->right);
+
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    // 1) (A U B) int. C -> (A int. C) U (B int. C)
+    // 2) A int (B U C) -> (A int. B) U (A int. C)
+    // 3) (A U B) \ C -> (A \ C) U (B \ C)
+    // 4) A \ (B U C) -> (A \ B) int. (A \ C)
+
+    if (node->op == OperationType::INTERSECTION
+      && node->left->op == OperationType::UNION) { // 1)
+
+      std::shared_ptr<RTCSGNode> A = node->left->left;
+      std::shared_ptr<RTCSGNode> B = node->left->right;
+      std::shared_ptr<RTCSGNode> C = node->right;
+
+      node->op = OperationType::UNION;
+      node->left = std::make_shared<RTCSGNode>(OperationType::INTERSECTION, A, C);
+      node->right = std::make_shared<RTCSGNode>(OperationType::INTERSECTION, B, C);
+      changed = true;
+    }
+    else if (node->op == OperationType::INTERSECTION
+      && node->right->op == OperationType::UNION) { // 2)
+
+      std::shared_ptr<RTCSGNode> A = node->left;
+      std::shared_ptr<RTCSGNode> B = node->right->left;
+      std::shared_ptr<RTCSGNode> C = node->right->right;
+
+      node->op = OperationType::UNION;
+      node->left = std::make_shared<RTCSGNode>(OperationType::INTERSECTION, A, B);
+      node->right = std::make_shared<RTCSGNode>(OperationType::INTERSECTION, A, C);
+      changed = true;
+    }
+    else if (node->op == OperationType::DIFFERENCE
+      && node->left->op == OperationType::UNION) { // 3)
+
+      std::shared_ptr<RTCSGNode> A = node->left->left;
+      std::shared_ptr<RTCSGNode> B = node->left->right;
+      std::shared_ptr<RTCSGNode> C = node->right;
+
+      node->op = OperationType::UNION;
+      node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, C);
+      node->right = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, B, C);
+      changed = true;
+    }
+    else if (node->op == OperationType::DIFFERENCE
+      && node->right->op == OperationType::UNION) { // 4)
+
+      std::shared_ptr<RTCSGNode> A = node->left;
+      std::shared_ptr<RTCSGNode> B = node->right->left;
+      std::shared_ptr<RTCSGNode> C = node->right->right;
+
+      node->op = OperationType::INTERSECTION;
+      node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, B);
+      node->right = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, C);
+      changed = true;
+    }
+
+    if (changed) { // there may be other new unions generated below -> should recurse again
+      node->left = distributeOperation(node->left);
+      node->right = distributeOperation(node->right);
+    }
+  }
+  return node;
 }

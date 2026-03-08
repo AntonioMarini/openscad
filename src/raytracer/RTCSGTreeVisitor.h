@@ -24,17 +24,22 @@ public:
   Response visit(State& state, const ColorNode& node) override;
 
 
+  // Binarize balanced methods for lists of childrens
   std::shared_ptr<RTCSGNode> binarizeNaive(
     std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op);
-  std::shared_ptr<RTCSGNode> binarizeBVH(std::vector<std::shared_ptr<RTCSGNode>>& children,
-                                         OperationType op);
+  std::shared_ptr<RTCSGNode> binarizeKD(
+    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op, int depth);
+
   // Entry point — same pattern as CSGTreeEvaluator::buildCSGTree
   std::shared_ptr<RTCSGNode> buildRTTree(const AbstractNode& node);
+
+  // Method used for distributing operations other than unions. Leaving all the unions on top of the tree.
+  std::shared_ptr<RTCSGNode> distributeOperation(std::shared_ptr<RTCSGNode> node);
 
   // Getter for the result
   std::shared_ptr<RTCSGNode> getRootNode() const { return rootNode; }
 
-  static Eigen::Vector3f getCentroid(const std::shared_ptr<RTCSGNode>& node);
+  Eigen::Vector3f getCentroid(const std::shared_ptr<RTCSGNode>& node);
 
   Eigen::Vector3f defaultColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
   void setDefaultColor(const Eigen::Vector3f& col) { defaultColor = col; }

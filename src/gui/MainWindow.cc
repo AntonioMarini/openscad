@@ -1476,11 +1476,16 @@ void MainWindow::compileCSG()
     RTCSGTreeVisitor rtVisitor;
     Color4f defaultMatColor = ColorMap::getColor(*this->qglview->colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
     rtVisitor.setDefaultColor(Eigen::Vector3f(defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b()));
+
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root()); // Tree for raytracing view
+    printRTCSGTree(rtRoot);
+
+    this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
+    printRTCSGTree(rtRoot);
+
    if (this->rtglview) {
     this->rtglview->setRTTree(this->rtRoot);
    }
-    printRTCSGTree(rtRoot);
 
     if (!isClosing) progress_report_prep(this->rootNode, report_func, this);
     else return;

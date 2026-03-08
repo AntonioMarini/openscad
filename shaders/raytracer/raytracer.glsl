@@ -58,11 +58,6 @@ struct Operation {
     int _pad;
 };
 
-struct OBB {
-    mat4 inv_transform;
-    vec4 half_extents; // xyz half extents, w unused
-};
-
 struct CSGCommand {
     uint type;
     uint id;

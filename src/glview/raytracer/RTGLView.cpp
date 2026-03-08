@@ -177,8 +177,8 @@ void RTGLView::paintGL() {
     glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
     glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
     glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
-    glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 2);
-    glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 0);
+    glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 1);
+    glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 1);
     glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
 
     if (colorscheme) {
