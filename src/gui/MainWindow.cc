@@ -762,8 +762,7 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
                    &MainWindow::onWindowShortcutExport3DActivated);
 
   auto shortcutRaytracer = new QShortcut(QKeySequence("F10"), this);
-  QObject::connect(shortcutRaytracer, &QShortcut::activated, this,
-                   &MainWindow::viewModeRaytracer);
+  QObject::connect(shortcutRaytracer, &QShortcut::activated, this, &MainWindow::viewModeRaytracer);
 
   // Adds dock specific behavior on visibility change
   QObject::connect(editorDock, &Dock::visibilityChanged, this,
@@ -1411,6 +1410,7 @@ void MainWindow::instantiateRoot()
 
     EvaluationSession session{doc.parent_path().string()};
     ContextHandle<BuiltinContext> builtin_context{Context::create<BuiltinContext>(&session)};
+
     setRenderVariables(builtin_context);
 
     std::shared_ptr<const FileContext> file_context;
@@ -1474,18 +1474,23 @@ void MainWindow::compileCSG()
 #endif
 
     RTCSGTreeVisitor rtVisitor;
-    Color4f defaultMatColor = ColorMap::getColor(*this->qglview->colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
-    rtVisitor.setDefaultColor(Eigen::Vector3f(defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b()));
+    Color4f defaultMatColor =
+      ColorMap::getColor(*this->qglview->colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
+    rtVisitor.setDefaultColor(
+      Eigen::Vector3f(defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b()));
 
-    this->rtRoot = rtVisitor.buildRTTree(*this->tree.root()); // Tree for raytracing view
+    this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());  // Tree for raytracing view
+    std::cout << "TREE: " << std::endl;
+
     printRTCSGTree(rtRoot);
 
+    std::cout << "\n\n\nDISTRIBUTED TREE: " << std::endl;
     this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
     printRTCSGTree(rtRoot);
 
-   if (this->rtglview) {
-    this->rtglview->setRTTree(this->rtRoot);
-   }
+    if (this->rtglview) {
+      this->rtglview->setRTTree(this->rtRoot);
+    }
 
     if (!isClosing) progress_report_prep(this->rootNode, report_func, this);
     else return;
@@ -3129,8 +3134,6 @@ void MainWindow::viewModeRaytracer()
   }
 
   if (!rtViewActive) {
-
-
     // Swap: hide OpenCSG view, show RT view in same position
     this->rtglview->setGeometry(this->qglview->geometry());
     this->rtglview->makeCurrent();

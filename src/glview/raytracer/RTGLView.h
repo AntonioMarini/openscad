@@ -19,7 +19,8 @@
 /***
  * Class responsible for handling and viewing, in a QT widget, the RT CSG Tree.
  *
- * This takes lot of duplicate code from QGLView.cc (Openscad preview widget), should be refactored to be a cleaner solution.
+ * This takes lot of duplicate code from QGLView.cc (Openscad preview widget), should be refactored to be
+ * a cleaner solution.
  *
  */
 class RTGLView : public QOpenGLWidget
@@ -33,15 +34,16 @@ public:
   // used for re trigger the flattening of the tree -> passing the new data to the gpu again
   bool needsRebuild = true;
 
-  void setQGLView(QGLView* view); // temporary solution to pick camera and other things from the openscad main preview widget
+  void setQGLView(QGLView *view);  // temporary solution to pick camera and other things from the
+                                   // openscad main preview widget
 
   bool mouse_drag_active = false;
 
-  void setCamera(const Camera* cam);
+  void setCamera(const Camera *cam);
   void setRTTree(std::shared_ptr<RTCSGNode> root);
 
   Eigen::Matrix4f getViewMatrix(const Camera& cam);
-  void setColorScheme(const ColorScheme* cs);
+  void setColorScheme(const ColorScheme *cs);
 
 protected:
   void initializeGL() override;
@@ -58,7 +60,7 @@ private:
   int frameCount = 0;
   float currentFps = 0.0f;
 
-  QGLView* qglview = nullptr;
+  QGLView *qglview = nullptr;
   QPointF lastMousePos;
 
   void wheelEvent(QWheelEvent *event) override;
@@ -67,11 +69,11 @@ private:
   void mouseReleaseEvent(QMouseEvent *event) override;
   void mouseDoubleClickEvent(QMouseEvent *event) override;
 
-  const Camera* openscadCam = nullptr;
+  const Camera *openscadCam = nullptr;
   std::shared_ptr<RTCSGNode> rtRoot;
 
   // Colorscheme
-  const ColorScheme* colorscheme = nullptr;
+  const ColorScheme *colorscheme = nullptr;
 
   // axes and crosshair
   void showAxes(const Color4f& col);
@@ -91,8 +93,11 @@ private:
   GLuint primitivesSSBO = 0;
   GLuint operationsSSBO = 0;
   GLuint commandsSSBO = 0;
+  GLuint obbsSSBO = 0;
 
   bool initialized = false;
+
+  int effectiveCacheSize = 1;
 
   // Camera (simple for now)
   Eigen::Vector3f camPos{0.0f, 0.0f, 3.0f};

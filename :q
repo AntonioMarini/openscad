@@ -1,0 +1,36 @@
+   openscad
+ ├╴  cmake
+ ├╴  cmake-build-debug
+ ├╴  color-schemes
+ ├╴  contrib
+ ├╴  doc
+ ├╴  examples
+ ├╴  fonts
+ ├╴  fonts-osx
+ ├╴  libraries
+ ├╴  locale
+ ├╴  patches
+ ├╴  releases
+ ├╴  resources
+ ├╴  scripts
+ ├╴  shaders
+ ├╴  snap
+ ├╴  src
+ ├╴  submodules
+ ├╴  templates
+ ├╴  tests
+ ├╴  winconsole
+ ├╴  xcode
+ ├╴  CMakeLists.txt
+ ├╴  CMakeSettings.json
+ ├╴  COPYING
+ ├╴  CPackConfig.cmake
+ ├╴  CPackSourceConfig.cmake
+ ├╴  CTestCustom.cmake
+ ├╴  CTestTestfile.cmake
+ ├╴  DartConfiguration.tcl
+ ├╴  Doxyfile
+ ├╴  Info.plist
+ ├╴  Info.plist.in
+ ├╴  OpenSCAD.sdef
+

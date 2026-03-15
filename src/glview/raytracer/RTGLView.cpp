@@ -5,51 +5,56 @@
 
 #include <QApplication>
 #include <QKeyEvent>
+#include <algorithm>
 #include <iostream>
 #include <string>
 
-static std::string loadShaderFile(const std::string& path) {
-    QFile file(QString::fromStdString(path));
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        std::cerr << "[RT] Failed to load shader: " << path << std::endl;
-        return "";
-    }
-    return file.readAll().toStdString();
+static std::string loadShaderFile(const std::string& path)
+{
+  QFile file(QString::fromStdString(path));
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    std::cerr << "[RT] Failed to load shader: " << path << std::endl;
+    return "";
+  }
+  return file.readAll().toStdString();
 }
 
-RTGLView::RTGLView(QWidget *parent) : QOpenGLWidget(parent) {
-    setFocusPolicy(Qt::StrongFocus);  // to receive key events
+RTGLView::RTGLView(QWidget *parent) : QOpenGLWidget(parent)
+{
+  setFocusPolicy(Qt::StrongFocus);  // to receive key events
 }
 
-RTGLView::~RTGLView() {
-    makeCurrent();
-    if (primitivesSSBO) glDeleteBuffers(1, &primitivesSSBO);
-    if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
-    if (commandsSSBO)   glDeleteBuffers(1, &commandsSSBO);
-    if (outputTexture)  glDeleteTextures(1, &outputTexture);
-    if (quadVAO)        glDeleteVertexArrays(1, &quadVAO);
-    if (quadVBO)        glDeleteBuffers(1, &quadVBO);
-    if (computeProgram) glDeleteProgram(computeProgram);
-    if (quadProgram)    glDeleteProgram(quadProgram);
-    doneCurrent();
+RTGLView::~RTGLView()
+{
+  makeCurrent();
+  if (primitivesSSBO) glDeleteBuffers(1, &primitivesSSBO);
+  if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
+  if (commandsSSBO) glDeleteBuffers(1, &commandsSSBO);
+  if (obbsSSBO) glDeleteBuffers(1, &obbsSSBO);
+  if (outputTexture) glDeleteTextures(1, &outputTexture);
+  if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
+  if (quadVBO) glDeleteBuffers(1, &quadVBO);
+  if (computeProgram) glDeleteProgram(computeProgram);
+  if (quadProgram) glDeleteProgram(quadProgram);
+  doneCurrent();
 }
 
-void RTGLView::setRTTree(std::shared_ptr<RTCSGNode> root) {
+void RTGLView::setRTTree(std::shared_ptr<RTCSGNode> root)
+{
   std::cout << "[RT] setRTTree called, root=" << (root != nullptr) << std::endl;
-    this->rtRoot = root;
-    this->needsRebuild = true;
-    update();  // trigger repaint
+  this->rtRoot = root;
+  this->needsRebuild = true;
+  update();  // trigger repaint
 }
 
-float RTGLView::getDPI() { return devicePixelRatio();}
+float RTGLView::getDPI() { return devicePixelRatio(); }
 // ---- GL Init ----
 
-void RTGLView::initializeGL() {
-    std::cout << "[RT] OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
+void RTGLView::initializeGL()
+{
+  std::cout << "[RT] OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
   std::string computeSrc = ShaderUtils::loadShaderSource("raytracer/raytracer.glsl");
   computeProgram = compileComputeShader(computeSrc);
-
-
 
   // Quad shader — use OpenSCAD's utility
   std::string vertSrc = ShaderUtils::loadShaderSource("raytracer/base.vert");
@@ -61,63 +66,63 @@ void RTGLView::initializeGL() {
   auto depthShader = ShaderUtils::compileShaderProgram(vertSrc, depthSrc);
   depthCopyProgram = depthShader.shader_program;
 
-    // Setup fullscreen quad
-    float quadVertices[] = {
-        -1.0f,  1.0f, 0.0f,  0.0f, 1.0f,
-        -1.0f, -1.0f, 0.0f,  0.0f, 0.0f,
-         1.0f,  1.0f, 0.0f,  1.0f, 1.0f,
-         1.0f, -1.0f, 0.0f,  1.0f, 0.0f,
-    };
+  // Setup fullscreen quad
+  float quadVertices[] = {
+    -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
+    1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 1.0f,  -1.0f, 0.0f, 1.0f, 0.0f,
+  };
 
-    glGenVertexArrays(1, &quadVAO);
-    glGenBuffers(1, &quadVBO);
-    glBindVertexArray(quadVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+  glGenVertexArrays(1, &quadVAO);
+  glGenBuffers(1, &quadVBO);
+  glBindVertexArray(quadVAO);
+  glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
 
-    // position
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+  // position
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
 
-    // texture coordinate
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+  // texture coordinate
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
 
-    glBindVertexArray(0);
+  glBindVertexArray(0);
 
-    initialized = true;
+  initialized = true;
 }
 
 // ---- Resize ----
 
-void RTGLView::resizeGL(int w, int h) {
-    // Recreate output texture at new size
-    if (outputTexture) glDeleteTextures(1, &outputTexture);
+void RTGLView::resizeGL(int w, int h)
+{
+  // Recreate output texture at new size
+  if (outputTexture) glDeleteTextures(1, &outputTexture);
 
-    glGenTextures(1, &outputTexture);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, outputTexture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+  glGenTextures(1, &outputTexture);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, outputTexture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
+  glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
 
-    if (depthTexture) glDeleteTextures(1, &depthTexture);
+  if (depthTexture) glDeleteTextures(1, &depthTexture);
 
-    glGenTextures(1, &depthTexture);
-    glBindTexture(GL_TEXTURE_2D, depthTexture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
+  glGenTextures(1, &depthTexture);
+  glBindTexture(GL_TEXTURE_2D, depthTexture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
 }
 
 // ---- Paint (main render) ----
 
-Eigen::Matrix4f RTGLView::getViewMatrix(const Camera& cam) {
+Eigen::Matrix4f RTGLView::getViewMatrix(const Camera& cam)
+{
   float dist = cam.viewer_distance;
 
   Eigen::Vector3f eye(0, -dist, 0);
@@ -129,12 +134,18 @@ Eigen::Matrix4f RTGLView::getViewMatrix(const Camera& cam) {
   Eigen::Vector3f u = s.cross(f);
 
   Eigen::Matrix4f lookAt = Eigen::Matrix4f::Identity();
-  lookAt(0,0) = s.x(); lookAt(0,1) = s.y(); lookAt(0,2) = s.z();
-  lookAt(1,0) = u.x(); lookAt(1,1) = u.y(); lookAt(1,2) = u.z();
-  lookAt(2,0) =-f.x(); lookAt(2,1) =-f.y(); lookAt(2,2) =-f.z();
-  lookAt(0,3) = -s.dot(eye);
-  lookAt(1,3) = -u.dot(eye);
-  lookAt(2,3) =  f.dot(eye);
+  lookAt(0, 0) = s.x();
+  lookAt(0, 1) = s.y();
+  lookAt(0, 2) = s.z();
+  lookAt(1, 0) = u.x();
+  lookAt(1, 1) = u.y();
+  lookAt(1, 2) = u.z();
+  lookAt(2, 0) = -f.x();
+  lookAt(2, 1) = -f.y();
+  lookAt(2, 2) = -f.z();
+  lookAt(0, 3) = -s.dot(eye);
+  lookAt(1, 3) = -u.dot(eye);
+  lookAt(2, 3) = f.dot(eye);
 
   // Rotations X, Y, Z (same order as OpenSCAD)
   Eigen::Affine3f rx(Eigen::AngleAxisf(cam.object_rot.x() * M_PI / 180.0, Eigen::Vector3f::UnitX()));
@@ -142,15 +153,16 @@ Eigen::Matrix4f RTGLView::getViewMatrix(const Camera& cam) {
   Eigen::Affine3f rz(Eigen::AngleAxisf(cam.object_rot.z() * M_PI / 180.0, Eigen::Vector3f::UnitZ()));
 
   // Translation to object
-  Eigen::Affine3f t_object(Eigen::Translation3f(
-      cam.object_trans.x(), cam.object_trans.y(), cam.object_trans.z()));
+  Eigen::Affine3f t_object(
+    Eigen::Translation3f(cam.object_trans.x(), cam.object_trans.y(), cam.object_trans.z()));
 
   // Combine: lookAt * Rx * Ry * Rz * T (same order as openscad GL calls)
   Eigen::Matrix4f rot = (rx * ry * rz).matrix();
   return lookAt * rot * t_object.matrix();
 }
 
-void RTGLView::paintGL() {
+void RTGLView::paintGL()
+{
   frameCount++;
   if (frameCount == 1) fpsTimer.start();
   if (fpsTimer.elapsed() >= 1000) {
@@ -160,144 +172,153 @@ void RTGLView::paintGL() {
     fpsTimer.restart();
   }
 
-    if (!initialized || !rtRoot) return;
+  if (!initialized || !rtRoot) return;
 
-    const int w = width() * devicePixelRatio();
-    const int h = height() * devicePixelRatio();
+  const int w = width() * devicePixelRatio();
+  const int h = height() * devicePixelRatio();
 
-    if (needsRebuild) {
-        rebuildGPUData();
-        needsRebuild = false;
-    }
+  if (needsRebuild) {
+    rebuildGPUData();
+    needsRebuild = false;
+  }
 
-    // ---- Compute shader ----
-    glUseProgram(computeProgram);
+  // ---- Compute shader ----
+  glUseProgram(computeProgram);
 
-    float aspectRatio = (float)w / (float)h;
-    glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
-    glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
-    glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
-    glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 1);
-    glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 1);
-    glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
+  float aspectRatio = (float)w / (float)h;
+  glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
+  glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
+  glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 1);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 0);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_use_cache"), 1);
+  // glUniform1i(glGetUniformLocation(computeProgram, "u_cache_size"), effectiveCacheSize);
 
-    if (colorscheme) {
-      Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
-      Color4f defaultMatColor = ColorMap::getColor(*colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
+  if (colorscheme) {
+    Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
+    Color4f defaultMatColor = ColorMap::getColor(*colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
 
-      glUniform3f(glGetUniformLocation(computeProgram, "u_background"), bg.r(), bg.g(), bg.b());
-      glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b());
-    } else {
-      glUniform3f(glGetUniformLocation(computeProgram, "u_background"), 0.5f, 0.7f, 1.0f);
-      glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), 1.0f, 1.0f, 1.0f); // White fallback
-    }
+    glUniform3f(glGetUniformLocation(computeProgram, "u_background"), bg.r(), bg.g(), bg.b());
+    glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), defaultMatColor.r(),
+                defaultMatColor.g(), defaultMatColor.b());
+  } else {
+    glUniform3f(glGetUniformLocation(computeProgram, "u_background"), 0.5f, 0.7f, 1.0f);
+    glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), 1.0f, 1.0f,
+                1.0f);  // White fallback
+  }
 
-    Eigen::Matrix4f view = getViewMatrix(*openscadCam);
-    Eigen::Matrix4f invView = view.inverse();
-    Eigen::Vector3f camPos = invView.block<3,1>(0,3);
+  Eigen::Matrix4f view = getViewMatrix(*openscadCam);
+  Eigen::Matrix4f invView = view.inverse();
+  Eigen::Vector3f camPos = invView.block<3, 1>(0, 3);
 
-    glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_inv_view"),
-                       1, GL_FALSE, invView.data());
-    glUniform3f(glGetUniformLocation(computeProgram, "u_camera_pos"),
-                camPos.x(), camPos.y(), camPos.z());
+  glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_inv_view"), 1, GL_FALSE, invView.data());
+  glUniform3f(glGetUniformLocation(computeProgram, "u_camera_pos"), camPos.x(), camPos.y(), camPos.z());
 
-    // Projection matrix — must match gluPerspective used for axes
-    float dist = openscadCam->viewer_distance;
-    float nearP = 0.1f;
-    float farP = dist * 10.0f;
-    float fovRad = openscadCam->fov * M_PI / 180.0f;
-    float tanHalf = tan(fovRad / 2.0f);
+  // Projection matrix — must match gluPerspective used for axes
+  float dist = openscadCam->viewer_distance;
+  float nearP = 0.1f;
+  float farP = dist * 10.0f;
+  float fovRad = openscadCam->fov * M_PI / 180.0f;
+  float tanHalf = tan(fovRad / 2.0f);
 
-    Eigen::Matrix4f proj = Eigen::Matrix4f::Zero();
-    proj(0,0) = 1.0f / (aspectRatio * tanHalf);
-    proj(1,1) = 1.0f / tanHalf;
-    proj(2,2) = -(farP + nearP) / (farP - nearP);
-    proj(2,3) = -(2.0f * farP * nearP) / (farP - nearP);
-    proj(3,2) = -1.0f;
+  Eigen::Matrix4f proj = Eigen::Matrix4f::Zero();
+  proj(0, 0) = 1.0f / (aspectRatio * tanHalf);
+  proj(1, 1) = 1.0f / tanHalf;
+  proj(2, 2) = -(farP + nearP) / (farP - nearP);
+  proj(2, 3) = -(2.0f * farP * nearP) / (farP - nearP);
+  proj(3, 2) = -1.0f;
 
-    glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_view"), 1, GL_FALSE, view.data());
-    glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_proj"), 1, GL_FALSE, proj.data());
+  glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_view"), 1, GL_FALSE, view.data());
+  glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_proj"), 1, GL_FALSE, proj.data());
 
-    // Bind SSBOs
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, primitivesSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, operationsSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, commandsSSBO);
+  // Bind SSBOs
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, primitivesSSBO);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, operationsSSBO);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, commandsSSBO);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, obbsSSBO);
 
-    // Bind output textures (color + depth)
-    glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
-    glBindImageTexture(1, depthTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+  // Bind output textures (color + depth)
+  glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+  glBindImageTexture(1, depthTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
 
-    // Dispatch
-    glDispatchCompute(((w+7) / 8 ), ((h+7) / 8), 1);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+  // Dispatch
+  glDispatchCompute(((w + 7) / 8), ((h + 7) / 8), 1);
+  glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 
-    // ---- Draw fullscreen quad (color) ----
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  // ---- Draw fullscreen quad (color) ----
+  glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glUseProgram(quadProgram);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, outputTexture);
-    glUniform1i(glGetUniformLocation(quadProgram, "screenTexture"), 0);
+  glUseProgram(quadProgram);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, outputTexture);
+  glUniform1i(glGetUniformLocation(quadProgram, "screenTexture"), 0);
+  if (colorscheme) {
+    Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
+    glUniform3f(glGetUniformLocation(quadProgram, "u_background"), bg.r(), bg.g(), bg.b());
+  } else {
+    glUniform3f(glGetUniformLocation(quadProgram, "u_background"), 0.5f, 0.7f, 1.0f);
+  }
 
-    glBindVertexArray(quadVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
+  glBindVertexArray(quadVAO);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glBindVertexArray(0);
 
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_ALWAYS);
-    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-    glDepthMask(GL_TRUE);
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_ALWAYS);
+  glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+  glDepthMask(GL_TRUE);
 
-    glUseProgram(depthCopyProgram);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, depthTexture);
-    glUniform1i(glGetUniformLocation(depthCopyProgram, "depthTex"), 0);
+  glUseProgram(depthCopyProgram);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, depthTexture);
+  glUniform1i(glGetUniformLocation(depthCopyProgram, "depthTex"), 0);
 
-    glBindVertexArray(quadVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
+  glBindVertexArray(quadVAO);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glBindVertexArray(0);
 
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glDepthFunc(GL_LESS);
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+  glDepthFunc(GL_LESS);
 
-    // Draw axes with depth test
-    glUseProgram(0);
-    glBindTexture(GL_TEXTURE_2D, 0);
+  // Draw axes with depth test
+  glUseProgram(0);
+  glBindTexture(GL_TEXTURE_2D, 0);
 
-    Color4f axesColor = ColorMap::getColor(*colorscheme, RenderColor::AXES_COLOR);
+  Color4f axesColor = ColorMap::getColor(*colorscheme, RenderColor::AXES_COLOR);
 
-    float aspect = (float)w / (float)h;
+  float aspect = (float)w / (float)h;
 
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    gluPerspective(openscadCam->fov, aspect, nearP, farP);
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  gluPerspective(openscadCam->fov, aspect, nearP, farP);
 
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    gluLookAt(0.0, -dist, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  gluLookAt(0.0, -dist, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0);
 
-    glRotated(openscadCam->object_rot.x(), 1.0, 0.0, 0.0);
-    glRotated(openscadCam->object_rot.y(), 0.0, 1.0, 0.0);
-    glRotated(openscadCam->object_rot.z(), 0.0, 0.0, 1.0);
+  glRotated(openscadCam->object_rot.x(), 1.0, 0.0, 0.0);
+  glRotated(openscadCam->object_rot.y(), 0.0, 1.0, 0.0);
+  glRotated(openscadCam->object_rot.z(), 0.0, 0.0, 1.0);
 
-    glTranslated(openscadCam->object_trans.x(),
-                 openscadCam->object_trans.y(),
-                 openscadCam->object_trans.z());
+  glTranslated(openscadCam->object_trans.x(), openscadCam->object_trans.y(),
+               openscadCam->object_trans.z());
 
-    showAxes(axesColor);
-    showScalemarkers(axesColor);
+  showAxes(axesColor);
+  showScalemarkers(axesColor);
 
-    // Small axes in corner (has its own projection, always on top)
-    glDisable(GL_DEPTH_TEST);
-    showSmallaxes(axesColor);
-    glEnable(GL_DEPTH_TEST);
+  // Small axes in corner (has its own projection, always on top)
+  glDisable(GL_DEPTH_TEST);
+  showSmallaxes(axesColor);
+  glEnable(GL_DEPTH_TEST);
 
-    glFinish();
-  update();
+  glFinish();
+  // update();
 }
 
-void RTGLView::setCamera(const Camera* cam) {
+void RTGLView::setCamera(const Camera *cam)
+{
   this->openscadCam = cam;
   this->fov = cam->fovValue();
   update();
@@ -305,73 +326,87 @@ void RTGLView::setCamera(const Camera* cam) {
 
 // ---- Rebuild GPU data from RTCSGNode tree ----
 
-void RTGLView::rebuildGPUData() {
-    // Flatten the tree — reuse your CSGTree logic
-    std::vector<Primitive> gpuPrimitives;
-    std::vector<Operation> gpuOperations;
-    std::vector<CSGCommand> gpuCommands;
+void RTGLView::rebuildGPUData()
+{
+  // Flatten the tree — reuse your CSGTree logic
+  std::vector<Primitive> gpuPrimitives;
+  std::vector<Operation> gpuOperations;
+  std::vector<CSGCommand> gpuCommands;
+  std::vector<OBB> gpuOBBs;
 
-    CSGTree tree(rtRoot);  // RTCSGNode is compatible with CSGNode for flatten
-    tree.flatten_tree(rtRoot, gpuPrimitives, gpuOperations, gpuCommands);
+  CSGTree tree(rtRoot);  // RTCSGNode is compatible with CSGNode for flatten
 
-    std::cout << "[RT] Primitives: " << gpuPrimitives.size()
-              << " Operations: " << gpuOperations.size()
-              << " Commands: " << gpuCommands.size() << std::endl;
+  tree.node_count.clear();
+  tree.node_duplicate_id.clear();
+  tree.node_first_cmd_id.clear();
+  tree.next_duplicate_id = 1;
+  tree.countNodes(rtRoot);
 
-    // Delete old SSBOs
-    if (primitivesSSBO) glDeleteBuffers(1, &primitivesSSBO);
-    if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
-    if (commandsSSBO)   glDeleteBuffers(1, &commandsSSBO);
+  int shared_count = 0;
+  for (auto& [ptr, cnt] : tree.node_count)
+    if (cnt > 1) shared_count++;
+  constexpr int CACHE_SIZE = 16;
+  int effective_cache = std::clamp(shared_count, 1, CACHE_SIZE);
+  this->effectiveCacheSize = effective_cache;
+
+  tree.flatten_tree(rtRoot, gpuPrimitives, gpuOperations, gpuCommands, gpuOBBs);
+
+  // Delete old SSBOs
+  if (primitivesSSBO) glDeleteBuffers(1, &primitivesSSBO);
+  if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
+  if (commandsSSBO) glDeleteBuffers(1, &commandsSSBO);
+  if (obbsSSBO) glDeleteBuffers(1, &obbsSSBO);
 
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-    // Create new SSBOs
-    auto createSSBO = [](GLuint& id, size_t size, const void* data, GLuint binding) {
-        glGenBuffers(1, &id);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, id);
-        glBufferData(GL_SHADER_STORAGE_BUFFER, size, data, GL_STATIC_DRAW);
-        glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, id);
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    };
+  // Create new SSBOs
+  auto createSSBO = [](GLuint& id, size_t size, const void *data, GLuint binding) {
+    glGenBuffers(1, &id);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, id);
+    glBufferData(GL_SHADER_STORAGE_BUFFER, size, data, GL_STATIC_DRAW);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, binding, id);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+  };
 
-    createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
-    createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
-    createSSBO(commandsSSBO,   gpuCommands.size() * sizeof(CSGCommand), gpuCommands.data(), 3);
+  createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
+  createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
+  createSSBO(commandsSSBO, gpuCommands.size() * sizeof(CSGCommand), gpuCommands.data(), 3);
+  createSSBO(obbsSSBO, gpuOBBs.size() * sizeof(OBB), gpuOBBs.data(), 4);
 
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
 // ---- Shader compilation helpers ----
 
-GLuint RTGLView::compileComputeShader(const std::string& source) {
-    const char* src = source.c_str();
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
+GLuint RTGLView::compileComputeShader(const std::string& source)
+{
+  const char *src = source.c_str();
+  GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
+  glShaderSource(shader, 1, &src, nullptr);
+  glCompileShader(shader);
 
-    GLint success;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        char log[1024];
-        glGetShaderInfoLog(shader, 1024, nullptr, log);
-        std::cerr << "[RT] Compute shader error:\n" << log << std::endl;
-    }
+  GLint success;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+  if (!success) {
+    char log[1024];
+    glGetShaderInfoLog(shader, 1024, nullptr, log);
+    std::cerr << "[RT] Compute shader error:\n" << log << std::endl;
+  }
 
-    GLuint program = glCreateProgram();
-    glAttachShader(program, shader);
-    glLinkProgram(program);
+  GLuint program = glCreateProgram();
+  glAttachShader(program, shader);
+  glLinkProgram(program);
 
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        char log[1024];
-        glGetProgramInfoLog(program, 1024, nullptr, log);
-        std::cerr << "[RT] Program link error:\n" << log << std::endl;
-    }
+  glGetProgramiv(program, GL_LINK_STATUS, &success);
+  if (!success) {
+    char log[1024];
+    glGetProgramInfoLog(program, 1024, nullptr, log);
+    std::cerr << "[RT] Program link error:\n" << log << std::endl;
+  }
 
-    glDeleteShader(shader);
-    return program;
+  glDeleteShader(shader);
+  return program;
 }
-
 
 void RTGLView::showSmallaxes(const Color4f& col)
 {
@@ -381,7 +416,7 @@ void RTGLView::showSmallaxes(const Color4f& col)
 
   const int w = width() * devicePixelRatio();
   const int h = height() * devicePixelRatio();
-  float aspectratio = (float)w/(float)h;
+  float aspectratio = (float)w / (float)h;
 
   // Set up an orthographic projection of the axis cross in the corner
   glMatrixMode(GL_PROJECTION);
@@ -535,11 +570,11 @@ void RTGLView::showScalemarkers(const Color4f& col)
   for (size_t div = 0; div < divs; ++div) {
     double i = div * tick_width;  // i represents the position along the axis
     int size_div;
-    if (line_cnt > 0 && line_cnt % 10 == 0) {        // major tick
-      size_div = size_div_sm * .5;                   // resize to a major tick
+    if (line_cnt > 0 && line_cnt % 10 == 0) {          // major tick
+      size_div = size_div_sm * .5;                     // resize to a major tick
       RTGLView::decodeMarkerValue(i, l, size_div_sm);  // print number
-    } else {                                         // minor tick
-      size_div = size_div_sm;                        // set the minor tick to the standard size
+    } else {                                           // minor tick
+      size_div = size_div_sm;                          // set the minor tick to the standard size
 
       // Draw additional labels if there are few major tick labels visible due to
       // zoom. Because the spacing/units of major tick marks only change when the
@@ -616,8 +651,7 @@ void RTGLView::showScalemarkers(const Color4f& col)
   }
 }
 
-void RTGLView::setColorScheme(const ColorScheme* cs) { this->colorscheme = cs; }
-
+void RTGLView::setColorScheme(const ColorScheme *cs) { this->colorscheme = cs; }
 
 void RTGLView::decodeMarkerValue(double i, double l, int size_div_sm)
 {
@@ -673,21 +707,23 @@ void RTGLView::decodeMarkerValue(double i, double l, int size_div_sm)
 
 // ---- Keyboard input (basic camera for testing) ----
 
-void RTGLView::keyPressEvent(QKeyEvent *event) {
-    float step = 0.3f;
-    switch (event->key()) {
-        case Qt::Key_W: camPos.z() -= step; break;
-        case Qt::Key_S: camPos.z() += step; break;
-        case Qt::Key_A: camPos.x() -= step; break;
-        case Qt::Key_D: camPos.x() += step; break;
-        case Qt::Key_Q: camPos.y() += step; break;
-        case Qt::Key_E: camPos.y() -= step; break;
-        default: QOpenGLWidget::keyPressEvent(event); return;
-    }
-    update();  // trigger repaint
+void RTGLView::keyPressEvent(QKeyEvent *event)
+{
+  float step = 0.3f;
+  switch (event->key()) {
+  case Qt::Key_W: camPos.z() -= step; break;
+  case Qt::Key_S: camPos.z() += step; break;
+  case Qt::Key_A: camPos.x() -= step; break;
+  case Qt::Key_D: camPos.x() += step; break;
+  case Qt::Key_Q: camPos.y() += step; break;
+  case Qt::Key_E: camPos.y() -= step; break;
+  default:        QOpenGLWidget::keyPressEvent(event); return;
+  }
+  update();  // trigger repaint
 }
 
-void RTGLView::setQGLView(QGLView* view) {
+void RTGLView::setQGLView(QGLView *view)
+{
   this->qglview = view;
   connect(qglview, &QGLView::cameraChanged, this, QOverload<>::of(&QOpenGLWidget::update));
 }
@@ -759,9 +795,7 @@ void RTGLView::mouseReleaseEvent(QMouseEvent *event)
   this->mouse_drag_active = false;
 }
 
-void RTGLView::mouseDoubleClickEvent(QMouseEvent *event) {
-  Q_UNUSED(event);
-}
+void RTGLView::mouseDoubleClickEvent(QMouseEvent *event) { Q_UNUSED(event); }
 
 void RTGLView::wheelEvent(QWheelEvent *event)
 {
@@ -769,4 +803,3 @@ void RTGLView::wheelEvent(QWheelEvent *event)
   int delta = event->angleDelta().y();
   qglview->zoom(delta, true);
 }
-
