@@ -3,13 +3,15 @@
 // Also tests MAX_STACK depth from the binarized difference chain.
 $fn = 16;
 
+cube_l = 30;
+
 color("goldenrod")
 difference() {
-  cube([32, 32, 32], center = true);
+  cube([cube_l, cube_l, cube_l], center = true);
 
   for (x = [-10, 0, 10])
     for (y = [-10, 0, 10])
       for (z = [-10, 0, 10])
         translate([x, y, z])
-          sphere(r = 5.5);
+          sphere(r = 6.5);
 }

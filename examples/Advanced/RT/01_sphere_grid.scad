@@ -1,9 +1,9 @@
 // 4×4×4 gradient sphere grid
 // Tests OBB culling (64 objects), span merging, and color interpolation.
-$fn = 20;
+$fn = 5;
 
-N       = 10;
-spacing = 12;
+N       = 6;
+spacing = 6;
 r       = 4;
 
 for (xi = [0:N-1])

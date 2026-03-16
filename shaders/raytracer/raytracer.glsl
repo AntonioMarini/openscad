@@ -9,11 +9,9 @@ layout(rgba32f, binding = 1) uniform image2D depthOutput;
 uniform mat4 u_view;
 uniform mat4 u_proj;
 
-#define MAX_SPANS 4
-#define MAX_STACK 8
-#define MAX_COMMANDS 1024
-#define MASK_WORDS (MAX_COMMANDS / 32)
-#define CACHE_SIZE 8
+#define MAX_SPANS 2
+#define MAX_STACK 16
+#define CACHE_SIZE 16
 
 // CONSTANTS
 const uint PRIMITIVE_TYPE_SPHERE = 1;
@@ -118,10 +116,7 @@ struct cache_entry {
 cache_entry span_cache[CACHE_SIZE];
 uint cache_current_id = 0;
 
-// --- STACK ---
-#define STACK(i)  stack[i]
 #define SCACHE(i) span_cache[i]
-// --- STACK ---
 
 int find_in_cache(uint dup_id) {
   for (int i = 0; i < u_cache_size; i++) {
@@ -298,12 +293,10 @@ vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal) {
   vec3 local_normal = get_local_normal(prim.type, local_pos, prim.r1, prim.r2);
   mat3 normal_matrix = transpose(mat3(prim.inv_transform));
   vec3 world_normal = normalize(normal_matrix * local_normal);
-  if (invert_normal) world_normal = -world_normal;
+  if (invert_normal) world_normal = -world_normal; // for inside faces
 
   vec3 view_dir = normalize(u_camera_pos - world_pos);
 
-  // Two headlights in eye/camera space — matches OpenSCAD's GL_LIGHT0 and GL_LIGHT1.
-  // Multiplying by mat3(u_inv_view) rotates them into world space so they follow the camera.
   mat3 eye_to_world = mat3(u_inv_view);
   vec3 light0 = normalize(eye_to_world * normalize(vec3(-1.0, +1.0, +1.0)));
   vec3 light1 = normalize(eye_to_world * normalize(vec3(+1.0, -1.0, -1.0)));
@@ -421,142 +414,105 @@ interval_list make_primitive_interval(vec2 span, uint id) {
   return list;
 }
 
-void set_bit(inout uint mask[MASK_WORDS], int bit) {
-  mask[bit / 32] |= (1u << (bit % 32));
-}
-
-bool get_bit(uint mask[MASK_WORDS], int bit) {
-  return (mask[bit / 32] & (1u << (bit % 32))) != 0u;
-}
-
 vec4 csg_span(ray r, ivec2 pixel_coords) {
-  interval_list stack[MAX_STACK]; // per-invocation local stack (register/spill, no shared-memory limit)
-  vec3 inv_ray_dir = 1.0 / (r.dir + vec3(1e-6));
-  uint num_ops = commands.length();
-  uint root_id = num_ops - 1;
-  CSGCommand root_cmd = commands[root_id];
+  interval_list res_stack[MAX_STACK]; // holds computed interval list
+  uint op_type_stack[MAX_STACK]; // pending operations stack
+  int op_received[MAX_STACK]; // for each operation collected in the stack store how many children it has
+  uint op_dup_id[MAX_STACK]; // ids of duplicate ops
 
-  if (u_use_obb == 1) {
-    if (obbs[root_id].skip == 1u || !intersect_obb(r.origin, r.dir, obbs[root_id].inv_transform)) {
-      imageStore(depthOutput, pixel_coords, vec4(1.0, 0.0, 0.0, 0.0));
-      return vec4(u_background, 1.0);
-    }
-  }
+  int res_sp = 0; // spans stack pointer
+  int op_sp = 0; // operations stack pointer
 
-  uint skip_mask[MASK_WORDS];
-  for (int i = 0; i < MASK_WORDS; i++) skip_mask[i] = 0u;
-
-  // First pass: determine which commands to skip based on OBB intersection
-  if (u_use_obb == 1) {
-    for (int i = int(num_ops) - 1; i >= 0; i--) {
-      if (get_bit(skip_mask, i)) continue;
-
-      CSGCommand cmd = commands[i];
-      if (obbs[i].skip == 1u || !intersect_obb(r.origin, r.dir, obbs[i].inv_transform)) {
-        uint skip_count = cmd.skip_children;
-        for (int j = 0; j < int(skip_count); j++) {
-          if (i - j >= 0) set_bit(skip_mask, i - j);
-        }
-      }
-    }
-  }
-
-  // Second pass: process commands, skipping those marked in the first pass
-  int sp = 0;
-
-  // Initialize ring buffer cache
+  // clear cache before use
   for (int c = 0; c < u_cache_size; c++) SCACHE(c).duplicate_id = 0u;
   cache_current_id = 0;
 
-  for (uint i = 0; i < num_ops; i++) {
-    CSGCommand command = commands[i];
-    bool is_skipped = get_bit(skip_mask, int(i));
+  uint num_ops = uint(commands.length());
 
-    // Cache lookup for duplicate nodes
-    if (u_use_cache == 1 && !is_skipped && command.duplicate_id != 0u) {
-      int cached = find_in_cache(command.duplicate_id);
+  // traversal of the csg tree, root -> leaves
+  for (uint i = 0; i < num_ops; ) {
+    CSGCommand cmd = commands[i];
+
+    bool has_result = false;
+    interval_list result;
+    result.count = 0;
+    uint advance = 1u;
+
+    // CACHE HIT -> return immediately the stored span
+    if (u_use_cache == 1 && cmd.duplicate_id != 0u) {
+      int cached = find_in_cache(cmd.duplicate_id);
       if (cached != -1) {
-        // Hit: push cached span -> skip entire subtree
-        STACK(sp) = SCACHE(cached).spans;
-        sp++;
-        i += command.skip_children - 1u; // -1 beacuse loop increments i at next iteration.
-        continue;
+        result = SCACHE(cached).spans;
+        has_result = true;
+        advance = cmd.skip_children;
       }
     }
 
-    // CACHED_REF: no subtree in commands after, result must come from cache.
-    if (command.type == ID_OP_TYPE_CACHED_REF) {
-      STACK(sp).count = 0;
-      sp++;
-      continue;
-    }
-
-    if (command.type == ID_OP_TYPE_PRIMITIVE) {
-      if (is_skipped) {
-        STACK(sp).count = 0;
-        sp++;
+    if (!has_result) {
+      if (cmd.type == ID_OP_TYPE_CACHED_REF) {
+        has_result = true;
       } else {
-        Primitive p = primitives[command.id];
-        ray local_ray;
-        local_ray.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
-        local_ray.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
 
-        // Primitives Span Logic
-        vec2 hit = NO_HIT_SPAN;
-        if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(local_ray);
-        if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(local_ray);
-        if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(local_ray, p.r1, p.r2);
+        // obb intersection check
+        bool obb_skip = u_use_obb == 1 &&
+            (obbs[i].skip == 1u || !intersect_obb(r.origin, r.dir, obbs[i].inv_transform));
 
-        if (hit.x < hit.y) {
-          STACK(sp).count = 1;
-          STACK(sp).spans[0].interval = hit;
-          STACK(sp).spans[0].packed_prim = pack_span_prim(command.id, false);
-        } else {
-          STACK(sp).count = 0;
+        if (obb_skip) { // empty result, skip this + children
+          has_result = true;
+          advance = cmd.skip_children;
+        } else if (cmd.type == ID_OP_TYPE_PRIMITIVE) { // Calculate span hit ray-primitive
+          Primitive p = primitives[cmd.id];
+          ray local_ray;
+          local_ray.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
+          local_ray.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
+
+          vec2 hit = NO_HIT_SPAN;
+          if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(local_ray);
+          else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(local_ray);
+          else if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(local_ray, p.r1, p.r2);
+
+          // actual hit something
+          if (hit.x < hit.y) {
+            result.count = 1;
+            result.spans[0].interval = hit;
+            result.spans[0].packed_prim = pack_span_prim(cmd.id, false);
+          }
+
+          if (u_use_cache == 1 && cmd.duplicate_id != 0u) save_to_cache(cmd.duplicate_id, result); // if have duplicates cache it
+          has_result = true;
+        } else { // OPERATION NODES
+          // init data for this node in the ops stacks
+          op_type_stack[op_sp] = operations[cmd.id].type;
+          op_received[op_sp] = 0;
+          op_dup_id[op_sp] = cmd.duplicate_id;
+          op_sp++;
+          i++;
+          continue;
         }
-
-        // Save to cache if duplicate
-        if (u_use_cache == 1 && command.duplicate_id != 0u) {
-          save_to_cache(command.duplicate_id, STACK(sp));
-        }
-
-        sp++;
-      }
-    } else {
-      sp--;
-      bool has_op2 = STACK(sp).count > 0;
-
-      sp--;
-      bool has_op1 = STACK(sp).count > 0;
-
-      if (is_skipped || (!has_op1 && !has_op2 && command.type != OP_TYPE_OPUNION)) {
-        STACK(sp).count = 0;
-        sp++;
-      } else {
-        interval_list op2_val;
-        op2_val.count = 0;
-        if (has_op2) op2_val = STACK(sp + 1);
-
-        interval_list op1_val;
-        op1_val.count = 0;
-        if (has_op1) op1_val = STACK(sp);
-
-        STACK(sp) = merge_spans(op1_val, op2_val, operations[command.id].type);
-
-        // Save to cache if duplicate
-        if (u_use_cache == 1 && command.duplicate_id != 0u) {
-          save_to_cache(command.duplicate_id, STACK(sp));
-        }
-
-        sp++;
       }
     }
+
+    // put this node hit result (empty or not empty) in the stack
+    res_stack[res_sp++] = result;
+    while (op_sp > 0) {
+      op_received[op_sp - 1]++; // update parent node (op_sp - 1) children count
+      if (op_received[op_sp - 1] < 2) break; // wait for both left and right nodes to be visited
+
+      // pop the children spans and merge them, then push the result
+      interval_list b = res_stack[--res_sp];
+      interval_list a = res_stack[--res_sp];
+      op_sp--; // go back to parent
+      interval_list merged = merge_spans(a, b, op_type_stack[op_sp]);
+      if (u_use_cache == 1 && op_dup_id[op_sp] != 0u) save_to_cache(op_dup_id[op_sp], merged); // if have duplicates cache it
+      res_stack[res_sp++] = merged;
+    }
+    i += advance; // skip logic
   }
 
-  if (sp > 0 && STACK(0).count > 0) {
-    interval_list final_list = STACK(0);
+  if (res_sp > 0 && res_stack[0].count > 0) {
+    interval_list final_list = res_stack[0];
     float t = 1e10;
-    int best_idx = -1;
+    int best_idx = -1; // the best (with closest t_enter) span index on the final list
     for (int k = 0; k < final_list.count; k++) {
       float t_enter = final_list.spans[k].interval.x;
       if (t_enter > 0.01 && t_enter < t) {
@@ -566,11 +522,9 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
     }
     if (best_idx != -1) {
       span hit = final_list.spans[best_idx];
+      vec3 hitPos = r.origin + r.dir * t; // calculate hit point
 
-      vec3 hitPos = r.origin + r.dir * t;
-
-      // Save also depth value in the openscad viewproj space in the depth texture
-      vec4 clipPos = u_proj * u_view * vec4(hitPos, 1.0);
+      vec4 clipPos = u_proj * u_view * vec4(hitPos, 1.0); // hit point in clip space
       float depth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
       imageStore(depthOutput, pixel_coords, vec4(depth, 0.0, 0.0, 0.0));
 
@@ -578,7 +532,6 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
     }
   }
 
-  // NO HIT
   imageStore(depthOutput, pixel_coords, vec4(1.0, 0.0, 0.0, 0.0));
   return vec4(u_background, 1.0);
 }

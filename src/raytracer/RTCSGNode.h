@@ -117,15 +117,14 @@ public:
     if (is_shared) {
       auto dup_it = node_duplicate_id.find(node.get());
       if (dup_it != node_duplicate_id.end()) {
-        // Already fully emitted — push a lightweight stub.
-        // The shader cache will supply the result; no subtree follows.
-        CSGCommand stub(CSGCommandType::CACHED_REF, 0);
-        stub.skip_children = 1;
-        stub.duplicate_id = dup_it->second;
-        auto stub_id = (unsigned int)commands.size();
-        commands.push_back(stub);
+        // Already fully emitted — push a lightweight cache reference id.
+        CSGCommand cache_ref_cmd(CSGCommandType::CACHED_REF, 0);
+        cache_ref_cmd.skip_children = 1;
+        cache_ref_cmd.duplicate_id = dup_it->second;
+        auto cache_ref_cmd_id = (unsigned int)commands.size();
+        commands.push_back(cache_ref_cmd);
         obbs.push_back(obbs[node_first_cmd_id[node.get()]]);  // reuse original OBB
-        return stub_id;
+        return cache_ref_cmd_id;
       }
 
       // First occurrence: reserve duplicate_id now so recursive children
@@ -133,35 +132,38 @@ public:
       node_duplicate_id[node.get()] = next_duplicate_id++;
     }
 
-    unsigned int cmd_id;
+    auto cmd_id = (unsigned int)commands.size();
 
     if (node->is_leaf()) {
       Primitive p(node->primitive, node->color, node->transform, node->r1, node->r2);
-      unsigned int prim_id = (unsigned int)primitives.size();
+      auto prim_id = (unsigned int)primitives.size();
       primitives.push_back(p);
 
       CSGCommand cmd(CSGCommandType::PRIMITIVE, prim_id);
       cmd.skip_children = 1;
       if (is_shared) cmd.duplicate_id = node_duplicate_id[node.get()];
 
-      cmd_id = (unsigned int)commands.size();
       commands.push_back(cmd);
       obbs.push_back(OBB::buildPrimitiveOBB(*node));
     } else {
-      unsigned int left_id = flatten_tree(node->left, primitives, operations, commands, obbs);
-      unsigned int right_id = flatten_tree(node->right, primitives, operations, commands, obbs);
-
-      Operation op(node->op, left_id, right_id);
-      unsigned int op_id = (unsigned int)operations.size();
+      Operation op(node->op, 0, 0);
+      auto op_id = (unsigned int)operations.size();
       operations.push_back(op);
 
       CSGCommand cmd(CSGCommandType::OPERATION, op_id);
-      cmd.skip_children = 1 + commands[left_id].skip_children + commands[right_id].skip_children;
+      cmd.skip_children = 0;
       if (is_shared) cmd.duplicate_id = node_duplicate_id[node.get()];
 
-      cmd_id = (unsigned int)commands.size();
       commands.push_back(cmd);
-      obbs.push_back(OBB::buildOperationOBB(node->op, obbs[left_id], obbs[right_id]));
+      obbs.emplace_back();
+
+      unsigned int left_id = flatten_tree(node->left, primitives, operations, commands, obbs);
+      unsigned int right_id = flatten_tree(node->right, primitives, operations, commands, obbs);
+
+      commands[cmd_id].skip_children = (unsigned int)commands.size() - cmd_id;
+      obbs[cmd_id] = OBB::buildOperationOBB(node->op, obbs[left_id], obbs[right_id]);
+      operations[op_id].left_id = left_id;
+      operations[op_id].right_id = right_id;
     }
 
     if (is_shared) node_first_cmd_id[node.get()] = cmd_id;

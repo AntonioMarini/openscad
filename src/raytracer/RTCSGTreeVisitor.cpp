@@ -274,9 +274,6 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr
     // 1) (A U B) int. C -> (A int. C) U (B int. C)
     // 2) A int (B U C) -> (A int. B) U (A int. C)
     // 3) (A U B) \ C -> (A \ C) U (B \ C)
-    // Rule 4 (A \ (B U C) -> (A\B) int. (A\C)) omitted: OBB of DIFFERENCE is
-    // always the left child's OBB, so distributing over the right yields no
-    // tighter bounds and only creates shared copies of A that waste cache slots.
 
     if (node->op == OperationType::INTERSECTION && node->left->op == OperationType::UNION) {  // 1)
 
