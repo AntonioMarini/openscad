@@ -194,6 +194,7 @@ void RTGLView::paintGL()
   glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
   glUniform1i(glGetUniformLocation(computeProgram, "u_use_cache"), 1);
   glUniform1i(glGetUniformLocation(computeProgram, "u_cache_size"), effectiveCacheSize);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_use_shadows"), 1);
 
   if (colorscheme) {
     Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);

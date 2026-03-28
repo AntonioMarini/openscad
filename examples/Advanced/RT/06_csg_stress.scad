@@ -4,7 +4,7 @@
 $fn = 20;
 
 SHELL_R  = 22;
-HOLE_R   =  5;
+HOLE_R   =  4;
 BORE_R   =  4;
 
 // Icosahedron-ish hole positions (12 vertices approximated with latitude rings)

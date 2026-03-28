@@ -9,7 +9,7 @@ layout(rgba32f, binding = 1) uniform image2D depthOutput;
 uniform mat4 u_view;
 uniform mat4 u_proj;
 
-#define MAX_SPANS 2
+#define MAX_SPANS 4
 #define MAX_STACK 16
 #define CACHE_SIZE 16
 
@@ -24,7 +24,8 @@ const uint OP_TYPE_OPDIFFERENCE = 4;
 
 const uint ID_OP_TYPE_PRIMITIVE = 0;
 const uint ID_OP_TYPE_OPERATION = 1;
-const uint ID_OP_TYPE_CACHED_REF = 2; // node type cached
+const uint ID_OP_TYPE_CACHED_OPERATION = 2;
+const uint ID_OP_TYPE_CACHED_PRIMITIVE = 3;
 
 const vec2 NO_HIT_SPAN = vec2(1.0 / 0.0, -1.0 / 0.0); // (inf, -inf)
 
@@ -42,6 +43,7 @@ uniform vec3 u_default_mat_color;
 uniform int u_use_obb;
 uniform int u_use_cache;
 uniform int u_cache_size;
+uniform int u_use_shadows;
 
 // STRUCTS
 struct Primitive {
@@ -113,6 +115,7 @@ struct cache_entry {
   uint duplicate_id;
   interval_list spans;
 };
+
 cache_entry span_cache[CACHE_SIZE];
 uint cache_current_id = 0;
 
@@ -287,7 +290,7 @@ vec3 get_local_normal(uint type, vec3 p, float r1, float r2) {
   return vec3(0, 1, 0);
 }
 
-vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal) {
+vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal, float shadow_factor) {
   mat4 inv_mat = prim.inv_transform;
   vec3 local_pos = (inv_mat * vec4(world_pos, 1.0)).xyz;
   vec3 local_normal = get_local_normal(prim.type, local_pos, prim.r1, prim.r2);
@@ -303,16 +306,14 @@ vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal) {
 
   // OpenSCAD lighting model: global ambient 0.2 + two white diffuse lights
   float ambient = 0.2;
-  float diffuse = max(0.0, dot(world_normal, light0))
+  float diffuse = max(0.0, dot(world_normal, light0)) * shadow_factor
       + max(0.0, dot(world_normal, light1));
 
-  // Fresnel edge darkening: silhouette edges fade darker, giving clear object borders
-  float fresnel = 1.0 - abs(dot(world_normal, view_dir));
-  float lighting = (ambient + diffuse) * (1.0 - pow(fresnel, 3.0) * 0.5);
+  float lighting = ambient + diffuse;
 
   // Specular: Blinn-Phong highlight on primary light
   vec3 half_dir = normalize(light0 + view_dir);
-  float specular = pow(max(0.0, dot(world_normal, half_dir)), 48.0) * 0.25;
+  float specular = pow(max(0.0, dot(world_normal, half_dir)), 48.0) * 0.25 * shadow_factor;
 
   return vec4(clamp(prim.color.rgb * lighting + vec3(specular), 0.0, 1.0), prim.color.a);
 }
@@ -414,13 +415,87 @@ interval_list make_primitive_interval(vec2 span, uint id) {
   return list;
 }
 
+bool csg_shadow_test(ray r) {
+  interval_list res_stack[MAX_STACK];
+  int res_sp = 0;
+  uint op_type_stack[MAX_STACK];
+  uint op_received[MAX_STACK];
+  int op_sp = 0;
+
+  uint num_ops = uint(commands.length());
+  for (uint i = 0; i < num_ops; ) {
+    CSGCommand cmd = commands[i];
+
+    bool has_result = false;
+    interval_list result;
+    result.count = 0;
+    uint advance = 1u;
+
+    bool obb_skip = u_use_obb == 1 &&
+        (obbs[i].skip == 1u || !intersect_obb(r.origin, r.dir, obbs[i].inv_transform));
+
+    if (obb_skip) {
+      has_result = true;
+      advance = cmd.skip_children;
+    } else if (cmd.type == ID_OP_TYPE_PRIMITIVE ||
+               cmd.type == ID_OP_TYPE_CACHED_PRIMITIVE) {
+      Primitive p = primitives[cmd.id];
+      ray local_ray;
+      local_ray.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
+      local_ray.dir    = (p.inv_transform * vec4(r.dir,    0.0)).xyz;
+
+      vec2 hit = NO_HIT_SPAN;
+      if      (p.type == PRIMITIVE_TYPE_SPHERE)   hit = intersect_unit_sphere(local_ray);
+      else if (p.type == PRIMITIVE_TYPE_CUBE)      hit = intersect_box_AABB(local_ray);
+      else if (p.type == PRIMITIVE_TYPE_CYLINDER)  hit = intersect_cylinder(local_ray, p.r1, p.r2);
+
+      if (hit.x < hit.y) {
+        result.count = 1;
+        result.spans[0].interval = hit;
+        result.spans[0].packed_prim = pack_span_prim(cmd.id, false);
+      }
+      has_result = true;
+    } else {
+      // CACHED_OPERATION or regular OPERATION: children are in the buffer
+      op_type_stack[op_sp] = operations[cmd.id].type;
+      op_received[op_sp]   = 0;
+      op_sp++;
+      i++;
+      continue;
+    }
+
+    res_stack[res_sp++] = result;
+    while (op_sp > 0) {
+      op_received[op_sp - 1]++;
+      if (op_received[op_sp - 1] < 2) break;
+      interval_list b = res_stack[--res_sp];
+      interval_list a = res_stack[--res_sp];
+      op_sp--;
+      interval_list merged = merge_spans(a, b, op_type_stack[op_sp]);
+      for (int k = 0; k < merged.count; k++) {
+        if (merged.spans[k].interval.x > 0.01) return true;
+      }
+      res_stack[res_sp++] = merged;
+    }
+    i += advance;
+  }
+
+  if (res_sp > 0) {
+    interval_list final_list = res_stack[0];
+    for (int k = 0; k < final_list.count; k++) {
+      if (final_list.spans[k].interval.x > 0.01) return true;
+    }
+  }
+  return false;
+}
+
 vec4 csg_span(ray r, ivec2 pixel_coords) {
   interval_list res_stack[MAX_STACK]; // holds computed interval list
-  uint op_type_stack[MAX_STACK]; // pending operations stack
-  int op_received[MAX_STACK]; // for each operation collected in the stack store how many children it has
-  uint op_dup_id[MAX_STACK]; // ids of duplicate ops
-
   int res_sp = 0; // spans stack pointer
+
+  uint op_type_stack[MAX_STACK]; // pending operations stack
+  uint op_received[MAX_STACK]; // for each operation collected in the stack store how many children it has
+  uint op_dup_id[MAX_STACK]; // ids of duplicate ops
   int op_sp = 0; // operations stack pointer
 
   // clear cache before use
@@ -449,7 +524,31 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
     }
 
     if (!has_result) {
-      if (cmd.type == ID_OP_TYPE_CACHED_REF) {
+      if (cmd.type == ID_OP_TYPE_CACHED_OPERATION) {
+        // Cache miss: children are now in the buffer — fall back like a regular operation
+        op_type_stack[op_sp] = operations[cmd.id].type;
+        op_received[op_sp] = 0;
+        op_dup_id[op_sp] = cmd.duplicate_id;
+        op_sp++;
+        i++;
+        continue;
+      } else if (cmd.type == ID_OP_TYPE_CACHED_PRIMITIVE) {
+        Primitive p = primitives[cmd.id];
+        ray local_ray;
+        local_ray.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
+        local_ray.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
+
+        vec2 hit = NO_HIT_SPAN;
+        if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(local_ray);
+        else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(local_ray);
+        else if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(local_ray, p.r1, p.r2);
+
+        if (hit.x < hit.y) {
+          result.count = 1;
+          result.spans[0].interval = hit;
+          result.spans[0].packed_prim = pack_span_prim(cmd.id, false);
+        }
+        if (u_use_cache == 1 && cmd.duplicate_id != 0u) save_to_cache(cmd.duplicate_id, result);
         has_result = true;
       } else {
 
@@ -511,24 +610,57 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
 
   if (res_sp > 0 && res_stack[0].count > 0) {
     interval_list final_list = res_stack[0];
-    float t = 1e10;
-    int best_idx = -1; // the best (with closest t_enter) span index on the final list
+
+    vec3 accumulated = vec3(0.0);
+    float remaining  = 1.0; // remaining result transparency (default none)
+    bool depth_written = false;
+
     for (int k = 0; k < final_list.count; k++) {
+      if (remaining < 0.01) break;
+
       float t_enter = final_list.spans[k].interval.x;
-      if (t_enter > 0.01 && t_enter < t) {
-        t = t_enter;
-        best_idx = k;
+      if (t_enter <= 0.01) continue;
+
+      span hit = final_list.spans[k];
+      vec3 hitPos = r.origin + r.dir * t_enter;
+
+      // depth from the first hit only
+      if (!depth_written) {
+        vec4 clipPos = u_proj * u_view * vec4(hitPos, 1.0);
+        float depth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
+        imageStore(depthOutput, pixel_coords, vec4(depth, 0.0, 0.0, 0.0));
+        depth_written = true;
       }
+
+      float shadow_factor = 1.0;
+      if (u_use_shadows == 1) {
+        Primitive hit_prim = primitives[span_prim_id(hit)];
+        vec3 local_pos = (hit_prim.inv_transform * vec4(hitPos, 1.0)).xyz;
+        vec3 local_n   = get_local_normal(hit_prim.type, local_pos, hit_prim.r1, hit_prim.r2);
+        mat3 normal_mat = transpose(mat3(hit_prim.inv_transform));
+        vec3 world_n    = normalize(normal_mat * local_n);
+        if (span_invert(hit)) world_n = -world_n;
+
+        mat3 eye_to_world = mat3(u_inv_view);
+        vec3 light0 = normalize(eye_to_world * normalize(vec3(-1.0, +1.0, +1.0)));
+
+        ray shadow_ray;
+        shadow_ray.origin = hitPos + world_n * 1e-3;
+        shadow_ray.dir    = light0;
+
+        if (csg_shadow_test(shadow_ray)) shadow_factor = 0.0;
+      }
+
+      vec4 span_color = get_final_color(hitPos, primitives[span_prim_id(hit)], span_invert(hit), shadow_factor);
+
+      // front-to-back alpha compositing
+      accumulated += span_color.rgb * span_color.a * remaining;
+      remaining   *= (1.0 - span_color.a);
     }
-    if (best_idx != -1) {
-      span hit = final_list.spans[best_idx];
-      vec3 hitPos = r.origin + r.dir * t; // calculate hit point
 
-      vec4 clipPos = u_proj * u_view * vec4(hitPos, 1.0); // hit point in clip space
-      float depth = (clipPos.z / clipPos.w) * 0.5 + 0.5;
-      imageStore(depthOutput, pixel_coords, vec4(depth, 0.0, 0.0, 0.0));
-
-      return get_final_color(hitPos, primitives[span_prim_id(hit)], span_invert(hit));
+    if (depth_written) {
+      // blend remaining transparency with background
+      return vec4(accumulated + u_background * remaining, 1.0);
     }
   }
 

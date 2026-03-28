@@ -4,7 +4,8 @@
 enum class CSGCommandType : unsigned int {
   PRIMITIVE = 0,
   OPERATION = 1,
-  CACHED_REF = 2,
+  CACHED_OPERATION = 2,
+  CACHED_PRIMITIVE = 3,
 };
 
 // OBB data lives in a separate GPU buffer (obbsSSBO, binding=4)

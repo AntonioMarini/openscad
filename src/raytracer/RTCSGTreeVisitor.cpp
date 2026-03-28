@@ -1,7 +1,3 @@
-//
-// Created by apollyon-black on 2/17/26.
-//
-
 #include "RTCSGTreeVisitor.h"
 #include "RTCSGNode.h"
 #include "core/ColorNode.h"
@@ -274,6 +270,8 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr
     // 1) (A U B) int. C -> (A int. C) U (B int. C)
     // 2) A int (B U C) -> (A int. B) U (A int. C)
     // 3) (A U B) \ C -> (A \ C) U (B \ C)
+    // 4) A \ (B int. C) -> (A \ B) U (A \ C)
+    // 5) A \ (B \ C) -> (A \ B) U (A int. C)
 
     if (node->op == OperationType::INTERSECTION && node->left->op == OperationType::UNION) {  // 1)
 
@@ -305,6 +303,28 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr
       node->op = OperationType::UNION;
       node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, C);
       node->right = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, B, C);
+      changed = true;
+    } else if (node->op == OperationType::DIFFERENCE &&
+               node->right->op == OperationType::INTERSECTION) {  // 4)
+
+      std::shared_ptr<RTCSGNode> A = node->left;
+      std::shared_ptr<RTCSGNode> B = node->right->left;
+      std::shared_ptr<RTCSGNode> C = node->right->right;
+
+      node->op = OperationType::UNION;
+      node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, B);
+      node->right = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, C);
+      changed = true;
+    } else if (node->op == OperationType::DIFFERENCE &&
+               node->right->op == OperationType::DIFFERENCE) {  // 5)
+
+      std::shared_ptr<RTCSGNode> A = node->left;
+      std::shared_ptr<RTCSGNode> B = node->right->left;
+      std::shared_ptr<RTCSGNode> C = node->right->right;
+
+      node->op = OperationType::UNION;
+      node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, B);
+      node->right = std::make_shared<RTCSGNode>(OperationType::INTERSECTION, A, C);
       changed = true;
     }
 

@@ -84,6 +84,12 @@ inline void printRTCSGTree(const std::shared_ptr<RTCSGNode>& node, int depth = 0
   }
 }
 
+inline int countRTCSGNodes(const std::shared_ptr<RTCSGNode>& node)
+{
+  if (!node) return 0;
+  return 1 + countRTCSGNodes(node->left) + countRTCSGNodes(node->right);
+}
+
 // FLATTENER CLASS
 class CSGTree
 {
@@ -94,7 +100,8 @@ public:
 
   std::map<RTCSGNode *, unsigned int> node_count;
   std::map<RTCSGNode *, unsigned int> node_duplicate_id;
-  std::map<RTCSGNode *, unsigned int> node_first_cmd_id;  // cmd index of first emission
+  std::map<RTCSGNode *, unsigned int> node_first_cmd_id;
+  std::map<RTCSGNode *, unsigned int> node_first_prim_id;
   unsigned int next_duplicate_id = 1;
 
   void countNodes(std::shared_ptr<RTCSGNode> node)
@@ -114,22 +121,30 @@ public:
 
     bool is_shared = node_count[node.get()] > 1;
 
+    bool is_second_occurrence = false;
+    unsigned int second_dup_id = 0;
+
     if (is_shared) {
       auto dup_it = node_duplicate_id.find(node.get());
       if (dup_it != node_duplicate_id.end()) {
-        // Already fully emitted — push a lightweight cache reference id.
-        CSGCommand cache_ref_cmd(CSGCommandType::CACHED_REF, 0);
-        cache_ref_cmd.skip_children = 1;
-        cache_ref_cmd.duplicate_id = dup_it->second;
-        auto cache_ref_cmd_id = (unsigned int)commands.size();
-        commands.push_back(cache_ref_cmd);
-        obbs.push_back(obbs[node_first_cmd_id[node.get()]]);  // reuse original OBB
-        return cache_ref_cmd_id;
+        if (node->is_leaf()) {
+          // Primitives can always recompute directly from primitives[] — keep lightweight stub
+          CSGCommand cache_ref_cmd(CSGCommandType::CACHED_PRIMITIVE, node_first_prim_id[node.get()]);
+          cache_ref_cmd.skip_children = 1;
+          cache_ref_cmd.duplicate_id = dup_it->second;
+          auto cache_ref_cmd_id = (unsigned int)commands.size();
+          commands.push_back(cache_ref_cmd);
+          obbs.push_back(obbs[node_first_cmd_id[node.get()]]);
+          return cache_ref_cmd_id;
+        }
+        // Operation: fall through to emit full subtree so the shader can recompute on cache miss
+        is_second_occurrence = true;
+        second_dup_id = dup_it->second;
+      } else {
+        // First occurrence: reserve duplicate_id now so recursive children
+        // can already reference it if needed.
+        node_duplicate_id[node.get()] = next_duplicate_id++;
       }
-
-      // First occurrence: reserve duplicate_id now so recursive children
-      // can already reference it if needed.
-      node_duplicate_id[node.get()] = next_duplicate_id++;
     }
 
     auto cmd_id = (unsigned int)commands.size();
@@ -141,7 +156,10 @@ public:
 
       CSGCommand cmd(CSGCommandType::PRIMITIVE, prim_id);
       cmd.skip_children = 1;
-      if (is_shared) cmd.duplicate_id = node_duplicate_id[node.get()];
+      if (is_shared) {
+        cmd.duplicate_id = node_duplicate_id[node.get()];
+        node_first_prim_id[node.get()] = prim_id;
+      }
 
       commands.push_back(cmd);
       obbs.push_back(OBB::buildPrimitiveOBB(*node));
@@ -150,9 +168,15 @@ public:
       auto op_id = (unsigned int)operations.size();
       operations.push_back(op);
 
-      CSGCommand cmd(CSGCommandType::OPERATION, op_id);
+      // 2nd+ occurrences use CACHED_OPERATION so the shader tries cache first,
+      // but falls back to children on miss (real eviction support)
+      CSGCommandType cmd_type = is_second_occurrence ? CSGCommandType::CACHED_OPERATION : CSGCommandType::OPERATION;
+      CSGCommand cmd(cmd_type, op_id);
       cmd.skip_children = 0;
-      if (is_shared) cmd.duplicate_id = node_duplicate_id[node.get()];
+      if (is_second_occurrence)
+        cmd.duplicate_id = second_dup_id;
+      else if (is_shared)
+        cmd.duplicate_id = node_duplicate_id[node.get()];
 
       commands.push_back(cmd);
       obbs.emplace_back();
@@ -166,7 +190,8 @@ public:
       operations[op_id].right_id = right_id;
     }
 
-    if (is_shared) node_first_cmd_id[node.get()] = cmd_id;
+    // Don't overwrite first_cmd_id on subsequent expansions
+    if (is_shared && !is_second_occurrence) node_first_cmd_id[node.get()] = cmd_id;
 
     return cmd_id;
   }

@@ -1481,12 +1481,13 @@ void MainWindow::compileCSG()
 
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());  // Tree for raytracing view
     std::cout << "TREE: " << std::endl;
-
     printRTCSGTree(rtRoot);
+    std::cout << "Nodes before distribution: " << countRTCSGNodes(rtRoot) << std::endl;
 
     std::cout << "\n\n\nDISTRIBUTED TREE: " << std::endl;
     this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
     printRTCSGTree(rtRoot);
+    std::cout << "Nodes after distribution: " << countRTCSGNodes(rtRoot) << std::endl;
 
     if (this->rtglview) {
       this->rtglview->setRTTree(this->rtRoot);
