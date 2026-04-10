@@ -32,7 +32,9 @@
 #include <fcntl.h>
 #endif
 #include <array>
+#include <chrono>
 #include <clocale>
+#include <ctime>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
@@ -103,6 +105,7 @@
 #include "io/export.h"
 #include "LibraryInfo.h"
 #include "openscad_gui.h"
+#include "glview/raytracer/BenchmarkConfig.h"
 #include "openscad_mimalloc.h"
 #include "platform/PlatformUtils.h"
 #include "RenderStatistic.h"
@@ -929,6 +932,23 @@ int openscad_main(int argc, char **argv)
   desc.add_options()("run-all-gui-tests", "special gui testing mode - run all the tests");
 #endif
 
+#ifndef OPENSCAD_NOGUI
+  desc.add_options()("benchmark", "Enable raytracer benchmark mode (GUI only)")(
+    "bench-steps", po::value<int>()->default_value(72), "Number of orbit steps")(
+    "bench-elevation", po::value<double>()->default_value(25.0), "Camera elevation in degrees")(
+    "bench-distance", po::value<double>()->default_value(-1.0),
+    "Orbit radius (-1 = use current camera distance)")("bench-output", po::value<std::string>(),
+                                                       "Output directory for benchmark results")(
+    "rt-obb", po::value<int>()->default_value(1), "Enable OBB culling (0/1)")(
+    "rt-cache", po::value<int>()->default_value(1), "Enable ray cache (0/1)")(
+    "rt-shadows", po::value<int>()->default_value(1), "Enable shadow rays (0/1)")(
+    "rt-samples", po::value<int>()->default_value(1), "Samples per pixel")(
+    "rt-distribution", po::value<int>()->default_value(1), "Enable CSG distribution optimisation (0/1)")(
+    "rt-binarization", po::value<int>()->default_value(1), "Binarization: 0=naive, 1=KD")(
+    "bench-width",  po::value<int>()->default_value(0), "Force viewport width in pixels (0 = keep current)")(
+    "bench-height", po::value<int>()->default_value(0), "Force viewport height in pixels (0 = keep current)");
+#endif
+
   po::options_description hidden("Hidden options");
   hidden.add_options()
 #ifdef Q_OS_MACOS
@@ -1190,7 +1210,38 @@ int openscad_main(int argc, char **argv)
       gui_test = "all";
     }
     auto reset_window_settings = vm.count("reset-window-settings") > 0;
-    rc = gui(inputFiles, original_path, argc, argv, gui_test, reset_window_settings);
+    BenchmarkConfig benchCfg;
+    if (vm.count("benchmark")) {
+      benchCfg.active = true;
+      benchCfg.steps = vm["bench-steps"].as<int>();
+      benchCfg.elevation = vm["bench-elevation"].as<double>();
+      benchCfg.distance = vm["bench-distance"].as<double>();
+      benchCfg.rtUseObb = vm["rt-obb"].as<int>();
+      benchCfg.rtUseCache = vm["rt-cache"].as<int>();
+      benchCfg.rtUseShadows = vm["rt-shadows"].as<int>();
+      benchCfg.rtSamples = vm["rt-samples"].as<int>();
+      benchCfg.rtUseDistribution = vm["rt-distribution"].as<int>();
+      benchCfg.rtBinarization = vm["rt-binarization"].as<int>();
+      benchCfg.bench_width  = vm["bench-width"].as<int>();
+      benchCfg.bench_height = vm["bench-height"].as<int>();
+      if (vm.count("bench-output")) {
+        benchCfg.output_dir = vm["bench-output"].as<std::string>();
+      } else {
+        // auto-generate output dir from model stem + timestamp
+        std::string stem = "benchmark";
+        if (!inputFiles.empty() && !inputFiles[0].empty()) {
+          stem = fs::path(inputFiles[0]).stem().string();
+        }
+        auto now = std::chrono::system_clock::now();
+        auto tt = std::chrono::system_clock::to_time_t(now);
+        std::tm tm_buf{};
+        localtime_r(&tt, &tm_buf);
+        char ts[32];
+        std::strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tm_buf);
+        benchCfg.output_dir = stem + "_" + ts;
+      }
+    }
+    rc = gui(inputFiles, original_path, argc, argv, gui_test, reset_window_settings, benchCfg);
 #endif
   } else {
     LOG("Requested GUI mode but can't open display!\n");

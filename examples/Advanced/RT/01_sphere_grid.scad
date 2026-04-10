@@ -3,8 +3,8 @@
 $fn = 5;
 
 N       = 5;
-spacing = 10;
-r       = 2;
+spacing = 6;
+r       = 1.2;
 
 for (xi = [0:N-1])
   for (yi = [0:N-1])

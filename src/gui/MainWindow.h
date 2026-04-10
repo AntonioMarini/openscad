@@ -191,6 +191,14 @@ public:
   void UnknownExceptionCleanup(std::string msg = "");
   void showFind(bool doFindAndReplace);
 
+  void setBenchmarkConfig(const BenchmarkConfig& cfg)
+  {
+    benchmarkConfig = cfg;
+    if (cfg.active) {
+      QTimer::singleShot(0, this, &MainWindow::actionRenderPreview);
+    }
+  }
+
 private:
   [[nodiscard]] QString getCurrentFileName() const;
 
@@ -213,6 +221,8 @@ private:
   std::shared_ptr<RTCSGNode> rtRoot;
   bool rtViewActive = false;
   void viewModeRaytracer();
+
+  BenchmarkConfig benchmarkConfig;
 
   void loadViewSettings();
   void loadDesignSettings();

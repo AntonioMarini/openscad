@@ -90,6 +90,12 @@ inline int countRTCSGNodes(const std::shared_ptr<RTCSGNode>& node)
   return 1 + countRTCSGNodes(node->left) + countRTCSGNodes(node->right);
 }
 
+inline int treeDepth(const std::shared_ptr<RTCSGNode>& node)
+{
+  if (!node) return 0;
+  return 1 + std::max(treeDepth(node->left), treeDepth(node->right));
+}
+
 // FLATTENER CLASS
 class CSGTree
 {

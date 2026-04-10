@@ -8,11 +8,14 @@
 #include <QWheelEvent>
 #include <QtGlobal>
 #include <QOpenGLWidget>
+#include <QTimer>
 #include <string>
+#include <vector>
 
 #include <Eigen/Core>
 
 #include "raytracer/RTCSGNode.h"
+#include "glview/raytracer/BenchmarkConfig.h"
 
 #include <QElapsedTimer>
 
@@ -45,6 +48,10 @@ public:
   Eigen::Matrix4f getViewMatrix(const Camera& cam);
   void setColorScheme(const ColorScheme *cs);
 
+  void setBenchmarkConfig(const BenchmarkConfig& cfg);
+  void startBenchmarkOrbit();
+  void setTreeStats(int nodeCount, int depth);
+
 protected:
   void initializeGL() override;
   void resizeGL(int w, int h) override;
@@ -59,6 +66,23 @@ private:
   QElapsedTimer fpsTimer;
   int frameCount = 0;
   float currentFps = 0.0f;
+
+  // Configurable shader uniforms
+  int rtUseObb = 1, rtUseCache = 1, rtUseShadows = 1, rtSamples = 1;
+
+  // Benchmark orbit state
+  BenchmarkConfig benchConfig;
+  int benchNodeCount = 0;
+  int benchTreeDepth = 0;
+  Camera benchmarkCam;
+  int benchStep = 0;
+  bool benchScreenshotTaken = false;
+  std::vector<float> benchFrameMs;
+  QTimer *benchTimer = nullptr;
+  QElapsedTimer benchFrameTimer;
+
+  void advanceBenchmarkStep();
+  void finishBenchmark();
 
   QGLView *qglview = nullptr;
   QPointF lastMousePos;
@@ -94,10 +118,9 @@ private:
   GLuint operationsSSBO = 0;
   GLuint commandsSSBO = 0;
   GLuint obbsSSBO = 0;
+  GLuint statsSSBO = 0;
 
   bool initialized = false;
-
-  int effectiveCacheSize = 1;
 
   // Camera (simple for now)
   Eigen::Vector3f camPos{0.0f, 0.0f, 3.0f};

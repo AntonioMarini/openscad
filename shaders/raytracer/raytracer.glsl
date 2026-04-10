@@ -88,6 +88,11 @@ layout(std430, binding = 3) readonly buffer CommandsBuffer {
 layout(std430, binding = 4) readonly buffer OBBBuffer {
   OBBData obbs[];
 };
+layout(std430, binding = 5) buffer StatsBuffer {
+  uint obb_skipped;
+  uint cache_hits;
+  uint cache_misses;
+};
 
 // bit 31 = invert_normal, bits 0-30 = primitive_id
 struct span {
@@ -415,7 +420,7 @@ interval_list make_primitive_interval(vec2 span, uint id) {
   return list;
 }
 
-bool csg_shadow_test(ray r) {
+bool csg_shadow_test(ray r, inout uint s_obb) {
   interval_list res_stack[MAX_STACK];
   int res_sp = 0;
   uint op_type_stack[MAX_STACK];
@@ -437,6 +442,7 @@ bool csg_shadow_test(ray r) {
     if (obb_skip) {
       has_result = true;
       advance = cmd.skip_children;
+      s_obb += cmd.skip_children;
     } else if (cmd.type == ID_OP_TYPE_PRIMITIVE ||
                cmd.type == ID_OP_TYPE_CACHED_PRIMITIVE) {
       Primitive p = primitives[cmd.id];
@@ -489,7 +495,7 @@ bool csg_shadow_test(ray r) {
   return false;
 }
 
-vec4 csg_span(ray r, ivec2 pixel_coords) {
+vec4 csg_span(ray r, ivec2 pixel_coords, inout uint s_obb, inout uint s_hits, inout uint s_misses) {
   interval_list res_stack[MAX_STACK]; // holds computed interval list
   int res_sp = 0; // spans stack pointer
 
@@ -520,6 +526,9 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
         result = SCACHE(cached).spans;
         has_result = true;
         advance = cmd.skip_children;
+        s_hits++;
+      } else {
+        s_misses++;
       }
     }
 
@@ -559,6 +568,7 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
         if (obb_skip) { // empty result, skip this + children
           has_result = true;
           advance = cmd.skip_children;
+          s_obb += cmd.skip_children;
         } else if (cmd.type == ID_OP_TYPE_PRIMITIVE) { // Calculate span hit ray-primitive
           Primitive p = primitives[cmd.id];
           ray local_ray;
@@ -648,7 +658,7 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
         shadow_ray.origin = hitPos + world_n * 1e-3;
         shadow_ray.dir    = light0;
 
-        if (csg_shadow_test(shadow_ray)) shadow_factor = 0.0;
+        if (csg_shadow_test(shadow_ray, s_obb)) shadow_factor = 0.0;
       }
 
       vec4 span_color = get_final_color(hitPos, primitives[span_prim_id(hit)], span_invert(hit), shadow_factor);
@@ -668,47 +678,74 @@ vec4 csg_span(ray r, ivec2 pixel_coords) {
   return vec4(u_background, 1.0);
 }
 
+shared uint wg_obb_skipped;
+shared uint wg_cache_hits;
+shared uint wg_cache_misses;
+
 float hash(vec2 p) {
   return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x))));
 }
 
 void main() {
+  // Zero workgroup-local stat accumulators
+  if (gl_LocalInvocationIndex == 0u) {
+    wg_obb_skipped = 0u;
+    wg_cache_hits  = 0u;
+    wg_cache_misses = 0u;
+  }
+  barrier();
+
   ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
   ivec2 dims = imageSize(imgOutput);
 
-  if (pixel_coords.x >= dims.x || pixel_coords.y >= dims.y) return;
+  uint inv_obb    = 0u;
+  uint inv_hits   = 0u;
+  uint inv_misses = 0u;
 
-  vec4 average_color = vec4(0.0);
-  int samples = u_samples;
-  for (int s = 0; s < samples; s++) {
-    vec2 jitter = vec2(hash(vec2(pixel_coords) + float(s)), hash(vec2(pixel_coords) + float(s) * 2.0)) - 0.5;
-    vec2 uv = (vec2(pixel_coords) + jitter) / vec2(dims);
-    uv = uv * 2.0 - 1.0;
+  if (pixel_coords.x < dims.x && pixel_coords.y < dims.y) {
+    vec4 average_color = vec4(0.0);
+    int samples = u_samples;
+    for (int s = 0; s < samples; s++) {
+      vec2 jitter = vec2(hash(vec2(pixel_coords) + float(s)), hash(vec2(pixel_coords) + float(s) * 2.0)) - 0.5;
+      vec2 uv = (vec2(pixel_coords) + jitter) / vec2(dims);
+      uv = uv * 2.0 - 1.0;
 
-    float tanHalfFov = tan(radians(fov) * 0.5);
-    vec3 rayDirLocal = normalize(vec3(uv.x * aspectRatio * tanHalfFov, uv.y * tanHalfFov, -1.0));
-    vec3 rayDirWorld = normalize(mat3(u_inv_view) * rayDirLocal);
+      float tanHalfFov = tan(radians(fov) * 0.5);
+      vec3 rayDirLocal = normalize(vec3(uv.x * aspectRatio * tanHalfFov, uv.y * tanHalfFov, -1.0));
+      vec3 rayDirWorld = normalize(mat3(u_inv_view) * rayDirLocal);
 
-    ray r;
-    r.origin = u_camera_pos;
-    r.dir = rayDirWorld;
+      ray r;
+      r.origin = u_camera_pos;
+      r.dir = rayDirWorld;
 
-    vec4 sample_color = csg_span(r, pixel_coords);
+      vec4 sample_color = csg_span(r, pixel_coords, inv_obb, inv_hits, inv_misses);
 
-    // Render obb outlines for debug
-    if (u_rendering_mode == 1) {
-      float wire = 0.0;
-      for (uint i = 0; i < commands.length(); i++) {
-        vec3 local_ro = (obbs[i].inv_transform * vec4(r.origin, 1.0)).xyz;
-        vec3 local_rd = (obbs[i].inv_transform * vec4(r.dir, 0.0)).xyz;
-        wire += wireframe_box(local_ro, local_rd, vec3(-1.0), vec3(1.0));
+      // Render obb outlines for debug
+      if (u_rendering_mode == 1) {
+        float wire = 0.0;
+        for (uint i = 0; i < commands.length(); i++) {
+          vec3 local_ro = (obbs[i].inv_transform * vec4(r.origin, 1.0)).xyz;
+          vec3 local_rd = (obbs[i].inv_transform * vec4(r.dir, 0.0)).xyz;
+          wire += wireframe_box(local_ro, local_rd, vec3(-1.0), vec3(1.0));
+        }
+        if (wire > 0.0) {
+          sample_color = mix(sample_color, vec4(0.0, 1.0, 0.2, 1.0), 0.6);
+        }
       }
-      if (wire > 0.0) {
-        sample_color = mix(sample_color, vec4(0.0, 1.0, 0.2, 1.0), 0.6);
-      }
+
+      average_color += sample_color;
     }
-
-    average_color += sample_color;
+    imageStore(imgOutput, pixel_coords, average_color / float(samples));
   }
-  imageStore(imgOutput, pixel_coords, average_color / float(samples));
+
+  // Two-level reduction: invocation → workgroup shared → global SSBO
+  atomicAdd(wg_obb_skipped,  inv_obb);
+  atomicAdd(wg_cache_hits,   inv_hits);
+  atomicAdd(wg_cache_misses, inv_misses);
+  barrier();
+  if (gl_LocalInvocationIndex == 0u) {
+    atomicAdd(obb_skipped,  wg_obb_skipped);
+    atomicAdd(cache_hits,   wg_cache_hits);
+    atomicAdd(cache_misses, wg_cache_misses);
+  }
 }

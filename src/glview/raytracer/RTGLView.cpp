@@ -5,8 +5,11 @@
 
 #include <QApplication>
 #include <QKeyEvent>
-#include <algorithm>
+#include <fstream>
+#include <filesystem>
 #include <iostream>
+#include <cmath>
+#include <numeric>
 #include <string>
 
 static std::string loadShaderFile(const std::string& path)
@@ -31,6 +34,7 @@ RTGLView::~RTGLView()
   if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
   if (commandsSSBO) glDeleteBuffers(1, &commandsSSBO);
   if (obbsSSBO) glDeleteBuffers(1, &obbsSSBO);
+  if (statsSSBO) glDeleteBuffers(1, &statsSSBO);
   if (outputTexture) glDeleteTextures(1, &outputTexture);
   if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
   if (quadVBO) glDeleteBuffers(1, &quadVBO);
@@ -182,6 +186,14 @@ void RTGLView::paintGL()
     needsRebuild = false;
   }
 
+  // Reset GPU stats at the start of the first measured frame (skip warmup, step 0)
+  if (benchConfig.active && benchStep == 1 && statsSSBO) {
+    const uint32_t zeros[3] = {0, 0, 0};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), zeros);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+  }
+
   // ---- Compute shader ----
   glUseProgram(computeProgram);
 
@@ -189,12 +201,11 @@ void RTGLView::paintGL()
   glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
   glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
   glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 1);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 4);
   glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 0);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), 1);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_use_cache"), 1);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_cache_size"), effectiveCacheSize);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_use_shadows"), 1);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), rtUseObb);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_use_cache"), rtUseCache);
+  glUniform1i(glGetUniformLocation(computeProgram, "u_use_shadows"), rtUseShadows);
 
   if (colorscheme) {
     Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
@@ -238,6 +249,7 @@ void RTGLView::paintGL()
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, operationsSSBO);
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, commandsSSBO);
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, obbsSSBO);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, statsSSBO);
 
   // Bind output textures (color + depth)
   glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
@@ -315,6 +327,21 @@ void RTGLView::paintGL()
   glEnable(GL_DEPTH_TEST);
 
   glFinish();
+
+  if (benchConfig.active) {
+    if (benchStep == 0) {
+      benchFrameTimer.start();  // warmup frame — just start the clock
+    } else {
+      float ms = benchFrameTimer.nsecsElapsed() / 1e6f;
+      benchFrameMs.push_back(ms);
+      benchFrameTimer.restart();
+      if (!benchScreenshotTaken) {
+        grabFramebuffer().save(QString::fromStdString(benchConfig.output_dir + "/frame.png"));
+        benchScreenshotTaken = true;
+      }
+    }
+    advanceBenchmarkStep();
+  }
   // update();
 }
 
@@ -343,13 +370,6 @@ void RTGLView::rebuildGPUData()
   tree.next_duplicate_id = 1;
   tree.countNodes(rtRoot);
 
-  int shared_count = 0;
-  for (auto& [ptr, cnt] : tree.node_count)
-    if (cnt > 1) shared_count++;
-  constexpr int CACHE_SIZE = 16;
-  int effective_cache = std::clamp(shared_count, 1, CACHE_SIZE);
-  this->effectiveCacheSize = effective_cache;
-
   tree.flatten_tree(rtRoot, gpuPrimitives, gpuOperations, gpuCommands, gpuOBBs);
 
   // Delete old SSBOs
@@ -373,6 +393,15 @@ void RTGLView::rebuildGPUData()
   createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
   createSSBO(commandsSSBO, gpuCommands.size() * sizeof(CSGCommand), gpuCommands.data(), 3);
   createSSBO(obbsSSBO, gpuOBBs.size() * sizeof(OBB), gpuOBBs.data(), 4);
+
+  // Stats SSBO — writable, initialized to zero; reset again at benchmark start
+  if (statsSSBO) glDeleteBuffers(1, &statsSSBO);
+  const uint32_t zeroStats[3] = {0, 0, 0};
+  glGenBuffers(1, &statsSSBO);
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
+  glBufferData(GL_SHADER_STORAGE_BUFFER, 3 * sizeof(uint32_t), zeroStats, GL_DYNAMIC_READ);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, statsSSBO);
+  glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
@@ -653,6 +682,120 @@ void RTGLView::showScalemarkers(const Color4f& col)
 }
 
 void RTGLView::setColorScheme(const ColorScheme *cs) { this->colorscheme = cs; }
+
+void RTGLView::setBenchmarkConfig(const BenchmarkConfig& cfg)
+{
+  benchConfig = cfg;
+  rtUseObb = cfg.rtUseObb;
+  rtUseCache = cfg.rtUseCache;
+  rtUseShadows = cfg.rtUseShadows;
+  rtSamples = cfg.rtSamples;
+}
+
+void RTGLView::setTreeStats(int nodeCount, int depth)
+{
+  benchNodeCount = nodeCount;
+  benchTreeDepth = depth;
+}
+
+void RTGLView::startBenchmarkOrbit()
+{
+  if (!openscadCam) return;
+  benchmarkCam = *openscadCam;
+  benchmarkCam.object_rot.x() = benchConfig.elevation;
+  benchmarkCam.object_rot.y() = 0.0;
+  if (benchConfig.distance > 0.0) {
+    benchmarkCam.viewer_distance = benchConfig.distance;
+  }
+  openscadCam = &benchmarkCam;
+
+  benchStep = 0;
+  benchFrameMs.clear();
+  benchScreenshotTaken = false;
+
+  if (benchConfig.bench_width > 0 && benchConfig.bench_height > 0) {
+    qreal dpr = devicePixelRatio();
+    int lw = static_cast<int>(std::ceil(benchConfig.bench_width / dpr));
+    int lh = static_cast<int>(std::ceil(benchConfig.bench_height / dpr));
+    setFixedSize(lw, lh);
+  }
+
+  // Reset GPU stats counters for this run
+  makeCurrent();
+  if (statsSSBO) {
+    const uint32_t zeros[3] = {0, 0, 0};
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), zeros);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+  }
+
+  std::filesystem::create_directories(benchConfig.output_dir);
+
+  if (!benchTimer) {
+    benchTimer = new QTimer(this);
+    benchTimer->setInterval(0);
+    connect(benchTimer, &QTimer::timeout, this, QOverload<>::of(&QOpenGLWidget::update));
+  }
+  benchTimer->start();
+}
+
+void RTGLView::advanceBenchmarkStep()
+{
+  benchStep++;
+  if (benchStep <= benchConfig.steps) {
+    benchmarkCam.object_rot.y() =
+      static_cast<double>(benchStep) * 360.0 / static_cast<double>(benchConfig.steps);
+  } else {
+    finishBenchmark();
+  }
+}
+
+void RTGLView::finishBenchmark()
+{
+  if (benchTimer) benchTimer->stop();
+
+  // Write CSV
+  std::string csvPath = benchConfig.output_dir + "/measurements.csv";
+  std::ofstream csv(csvPath);
+  csv << "step,azimuth_deg,frame_ms,fps\n";
+  for (int i = 0; i < static_cast<int>(benchFrameMs.size()); ++i) {
+    float ms = benchFrameMs[i];
+    float fps = ms > 0.0f ? 1000.0f / ms : 0.0f;
+    double azimuth = static_cast<double>(i + 1) * 360.0 / static_cast<double>(benchConfig.steps);
+    csv << (i + 1) << "," << azimuth << "," << ms << "," << fps << "\n";
+  }
+  csv.close();
+
+  // Print summary
+  if (!benchFrameMs.empty()) {
+    float total = std::accumulate(benchFrameMs.begin(), benchFrameMs.end(), 0.0f);
+    float avg_ms = total / static_cast<float>(benchFrameMs.size());
+    float avg_fps = avg_ms > 0.0f ? 1000.0f / avg_ms : 0.0f;
+    float min_ms = *std::min_element(benchFrameMs.begin(), benchFrameMs.end());
+    float max_ms = *std::max_element(benchFrameMs.begin(), benchFrameMs.end());
+    float max_fps = min_ms > 0.0f ? 1000.0f / min_ms : 0.0f;
+    float min_fps = max_ms > 0.0f ? 1000.0f / max_ms : 0.0f;
+
+    // Read back GPU stats
+    uint32_t gpuStats[3] = {0, 0, 0};
+    if (statsSSBO) {
+      glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
+      glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), gpuStats);
+      glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+    }
+
+    const int px = width() * devicePixelRatio();
+    const int py = height() * devicePixelRatio();
+    std::cout << "[BENCH] total_frames=" << benchFrameMs.size() << " avg_fps=" << avg_fps
+              << " min_fps=" << min_fps << " max_fps=" << max_fps << " node_count=" << benchNodeCount
+              << " tree_depth=" << benchTreeDepth << " render_w=" << px << " render_h=" << py
+              << " obb_skipped=" << gpuStats[0] << " cache_hits=" << gpuStats[1]
+              << " cache_misses=" << gpuStats[2] << " output=" << benchConfig.output_dir << std::endl;
+  }
+
+  QApplication::quit();
+}
 
 void RTGLView::decodeMarkerValue(double i, double l, int size_div_sm)
 {

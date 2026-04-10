@@ -814,6 +814,7 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
 
   // fills the content of the Recents Files menu.
   updateRecentFileActions();
+
 }
 
 void MainWindow::setAllMouseViewActions()
@@ -1478,6 +1479,7 @@ void MainWindow::compileCSG()
       ColorMap::getColor(*this->qglview->colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
     rtVisitor.setDefaultColor(
       Eigen::Vector3f(defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b()));
+    rtVisitor.setBinarizationMethod(benchmarkConfig.rtBinarization);
 
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());  // Tree for raytracing view
     std::cout << "TREE: " << std::endl;
@@ -1485,12 +1487,30 @@ void MainWindow::compileCSG()
     std::cout << "Nodes before distribution: " << countRTCSGNodes(rtRoot) << std::endl;
 
     std::cout << "\n\n\nDISTRIBUTED TREE: " << std::endl;
-    this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
+    if (!benchmarkConfig.active || benchmarkConfig.rtUseDistribution) {
+      this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
+    }
     printRTCSGTree(rtRoot);
     std::cout << "Nodes after distribution: " << countRTCSGNodes(rtRoot) << std::endl;
 
+    int rtNodeCount = countRTCSGNodes(rtRoot);
+    int rtDepth = treeDepth(rtRoot);
+
     if (this->rtglview) {
       this->rtglview->setRTTree(this->rtRoot);
+      this->rtglview->setTreeStats(rtNodeCount, rtDepth);
+    }
+
+    if (benchmarkConfig.active) {
+      QTimer::singleShot(0, this, [this]() {
+        if (!this->rtglview || !this->rtglview->isVisible()) {
+          viewModeRaytracer();
+        }
+        if (this->rtglview) {
+          this->rtglview->setBenchmarkConfig(benchmarkConfig);
+          this->rtglview->startBenchmarkOrbit();
+        }
+      });
     }
 
     if (!isClosing) progress_report_prep(this->rootNode, report_func, this);
@@ -3140,6 +3160,7 @@ void MainWindow::viewModeRaytracer()
     this->rtglview->makeCurrent();
     this->rtglview->needsRebuild = true;
     this->rtglview->setRTTree(this->rtRoot);
+    this->rtglview->setTreeStats(countRTCSGNodes(this->rtRoot), treeDepth(this->rtRoot));
     this->qglview->hide();
     this->rtglview->show();
     this->rtglview->setFocus();

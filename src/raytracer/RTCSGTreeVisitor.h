@@ -44,6 +44,9 @@ public:
   Eigen::Vector3f defaultColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
   void setDefaultColor(const Eigen::Vector3f& col) { defaultColor = col; }
 
+  bool useKDBinarization = true;
+  void setBinarizationMethod(int m) { useKDBinarization = (m != 0); }
+
   ~RTCSGTreeVisitor() override = default;
 
 private:

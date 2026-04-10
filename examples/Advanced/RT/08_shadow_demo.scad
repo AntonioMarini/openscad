@@ -11,37 +11,37 @@ $fn = 32;
 
 // ── Opaque backdrop sphere (red) ──────────────────────────────────────────
 color("tomato")
-  sphere(r = 10);
+  sphere(r = 5);
 
 // ── Semi-transparent glass sphere in front (alpha 0.3 → 70% see-through) ─
 // Offset in +Y (toward the default camera) so it sits in front of the red one.
 color([0.4, 0.8, 1.0, 0.3])
-  translate([0, -28, 0])
-    sphere(r = 9);
+  translate([0, -12, 0])
+    sphere(r = 4.5);
 
 // ── Floor below both spheres – catches shadows and shows through the glass ─
 color("lightgray")
-  translate([0, 0, -12])
-    cube([80, 80, 2], center = true);
+  translate([0, 0, -6])
+    cube([30, 30, 1], center = true);
 
 // ── Opaque reference objects off to the side ─────────────────────────────
 // Tall cylinder (left) – hard shadow on floor
 color("steelblue")
-  translate([-25, 0, -11])
-    cylinder(r = 4, h = 26);
+  translate([-12, 0, -5.5])
+    cylinder(r = 2, h = 13);
 
 // Cube (right) – angled shadow
 color("goldenrod")
-  translate([20, 0, -11])
+  translate([10, 0, -5.5])
     rotate([0, 0, 20])
-      cube([10, 10, 20]);
+      cube([5, 5, 10]);
 
 // ── Second transparency test: stacked translucent slabs ───────────────────
 // A ray through both slabs should tint twice.
 color([1.0, 0.3, 0.0, 0.5])   // orange, 50 % opaque
-  translate([0, -12, 8])
-    cube([16, 2, 16], center = true);
+  translate([0, -6, 4])
+    cube([8, 1, 8], center = true);
 
 color([0.2, 0.9, 0.2, 0.5])   // green, 50 % opaque (sits behind the orange slab)
-  translate([0, -15, 8])
-    cube([16, 2, 16], center = true);
+  translate([0, -7.5, 4])
+    cube([8, 1, 8], center = true);

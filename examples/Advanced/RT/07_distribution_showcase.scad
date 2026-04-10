@@ -10,33 +10,33 @@
 // Bottom row: three combos where two rules fire in sequence.
 $fn = 24;
 
-// ── Row 1 (y = +34): Single rules 1–3 ────────────────────────────────────────
+// ── Row 1 (y = +11): Single rules 1–3 ────────────────────────────────────────
 
 // Rule 1 — (A ∪ B) ∩ C
 // Central sphere + six radial satellites, all clipped by a cube.
 // After distribution: 7 independent (primitive ∩ cube) pairs under a union.
 color("gold")
-translate([-28, 34, 0])
+translate([-9, 11, 0])
 intersection() {
   union() {
-    sphere(r = 7);
+    sphere(r = 3.5);
     for (a = [0, 60, 120, 180, 240, 300])
-      rotate([0, 0, a]) translate([9, 0, 0]) sphere(r = 3.2);
+      rotate([0, 0, a]) translate([4.5, 0, 0]) sphere(r = 1.6);
   }
-  cube([18, 18, 18], center = true);
+  cube([9, 9, 9], center = true);
 }
 
 // Rule 2 — A ∩ (B ∪ C)
 // Three orthogonal bars (union) clipped by a sphere.
 // After distribution: (sphere ∩ bar_Z) ∪ (sphere ∩ bar_X) ∪ (sphere ∩ bar_Y).
 color("steelblue")
-translate([0, 34, 0])
+translate([0, 11, 0])
 intersection() {
-  sphere(r = 9);
+  sphere(r = 4.5);
   union() {
-    cube([ 5,  5, 22], center = true);
-    cube([22,  5,  5], center = true);
-    cube([ 5, 22,  5], center = true);
+    cube([ 2.5,  2.5, 11], center = true);
+    cube([11,  2.5,  2.5], center = true);
+    cube([ 2.5, 11,  2.5], center = true);
   }
 }
 
@@ -44,13 +44,13 @@ intersection() {
 // Two overlapping spheres (peanut) with a cylindrical bore.
 // After distribution: (sphere_L \ cyl) ∪ (sphere_R \ cyl).
 color("tomato")
-translate([28, 34, 0])
+translate([9, 11, 0])
 difference() {
   union() {
-    translate([-5, 0, 0]) sphere(r = 7);
-    translate([ 5, 0, 0]) sphere(r = 7);
+    translate([-2.5, 0, 0]) sphere(r = 3.5);
+    translate([ 2.5, 0, 0]) sphere(r = 3.5);
   }
-  cylinder(r = 3, h = 22, center = true);
+  cylinder(r = 1.5, h = 11, center = true);
 }
 
 // ── Row 2 (y = 0): Single rules 4–5 + combo 1+2 ──────────────────────────────
@@ -59,12 +59,12 @@ difference() {
 // Sphere with a Steinmetz solid (intersection of two crossed cylinders) removed.
 // After distribution: (sphere \ cyl_Z) ∪ (sphere \ cyl_X).
 color("orchid")
-translate([-28, 0, 0])
+translate([-9, 0, 0])
 difference() {
-  sphere(r = 8);
+  sphere(r = 4);
   intersection() {
-    cylinder(r = 3.5, h = 20, center = true);
-    rotate([90, 0, 0]) cylinder(r = 3.5, h = 20, center = true);
+    cylinder(r = 1.75, h = 10, center = true);
+    rotate([90, 0, 0]) cylinder(r = 1.75, h = 10, center = true);
   }
 }
 
@@ -75,10 +75,10 @@ difference() {
 color("mediumseagreen")
 translate([0, 0, 0])
 difference() {
-  cube([16, 16, 16], center = true);
+  cube([8, 8, 8], center = true);
   difference() {
-    sphere(r = 10);
-    sphere(r = 8);
+    sphere(r = 5);
+    sphere(r = 4);
   }
 }
 
@@ -87,33 +87,33 @@ difference() {
 // Rule 1 fires first → A∩(C∪D) ∪ B∩(C∪D);
 // Rule 2 fires on each half → 4 union terms total.
 color("darkorange")
-translate([28, 0, 0])
+translate([9, 0, 0])
 intersection() {
   union() {
-    translate([-5, 0, 0]) sphere(r = 6);
-    translate([ 5, 0, 0]) sphere(r = 6);
+    translate([-2.5, 0, 0]) sphere(r = 3);
+    translate([ 2.5, 0, 0]) sphere(r = 3);
   }
   union() {
-    cube([20,  5,  5], center = true);
-    cube([ 5,  5, 20], center = true);
+    cube([10,  2.5,  2.5], center = true);
+    cube([ 2.5,  2.5, 10], center = true);
   }
 }
 
-// ── Row 3 (y = -34): Two-rule combination chains ─────────────────────────────
+// ── Row 3 (y = -11): Two-rule combination chains ─────────────────────────────
 
 // Combo: Rules 3 + 4 — (A ∪ B) \ (C ∩ D)
 // Two spheres minus the Steinmetz solid of two crossed cylinders.
 // Rule 3: (A\(C∩D)) ∪ (B\(C∩D));  Rule 4 on each half → 4 union terms.
 color("coral")
-translate([-28, -34, 0])
+translate([-9, -11, 0])
 difference() {
   union() {
-    translate([-5, 0, 0]) sphere(r = 6);
-    translate([ 5, 0, 0]) sphere(r = 6);
+    translate([-2.5, 0, 0]) sphere(r = 3);
+    translate([ 2.5, 0, 0]) sphere(r = 3);
   }
   intersection() {
-    cylinder(r = 3.5, h = 20, center = true);
-    rotate([90, 0, 0]) cylinder(r = 3.5, h = 20, center = true);
+    cylinder(r = 1.75, h = 10, center = true);
+    rotate([90, 0, 0]) cylinder(r = 1.75, h = 10, center = true);
   }
 }
 
@@ -123,15 +123,15 @@ difference() {
 // Rule 3: (A\(C\D)) ∪ (B\(C\D));  Rule 5 on each: (A\C ∪ A∩D) ∪ (B\C ∪ B∩D)
 // → 4 union terms.
 color("mediumpurple")
-translate([0, -34, 0])
+translate([0, -11, 0])
 difference() {
   union() {
-    translate([-4, 0, 0]) sphere(r = 6);
-    translate([ 4, 0, 0]) sphere(r = 6);
+    translate([-2, 0, 0]) sphere(r = 3);
+    translate([ 2, 0, 0]) sphere(r = 3);
   }
   difference() {
-    cylinder(r = 4, h = 18, center = true);
-    sphere(r = 3);
+    cylinder(r = 2, h = 9, center = true);
+    sphere(r = 1.5);
   }
 }
 
@@ -140,14 +140,14 @@ difference() {
 // the parent then becomes A ∩ ((B\C) ∪ (B\D)) and Rule 2 fires → 2 union terms.
 // Visually: sphere clipping a cube that has a Steinmetz notch cut in.
 color("deepskyblue")
-translate([28, -34, 0])
+translate([9, -11, 0])
 intersection() {
-  sphere(r = 9);
+  sphere(r = 4.5);
   difference() {
-    cube([14, 14, 14], center = true);
+    cube([7, 7, 7], center = true);
     intersection() {
-      cylinder(r = 4, h = 20, center = true);
-      rotate([90, 0, 0]) cylinder(r = 4, h = 20, center = true);
+      cylinder(r = 2, h = 10, center = true);
+      rotate([90, 0, 0]) cylinder(r = 2, h = 10, center = true);
     }
   }
 }

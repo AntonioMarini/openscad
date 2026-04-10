@@ -126,7 +126,9 @@ void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, O
   } else {
     // Union and Intersection are commutative -> balanced binarization (TODO: make binarization method
     // dynamic)
-    this->stored_term[node.index()] = binarizeKD(validChildren, op);
+    this->stored_term[node.index()] = useKDBinarization
+        ? binarizeKD(validChildren, op)
+        : binarizeNaive(validChildren, op);
   }
 }
 
