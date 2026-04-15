@@ -634,7 +634,7 @@ interval_list csg_traverse(ray r, inout uint s_obb, inout uint s_hits, inout uin
   for (int c = 0; c < CACHE_SIZE; c++) wg_span_cache[c][tid].key = 0u;
 
   uint num_ops = uint(commands.length());
-  simplified traversal of the CSG tree returning a boolean occlusion result .
+//simplified traversal of the CSG tree returning a boolean occlusion result .
 // Traversal of the CSG tree, root → leaves
 for ( uint i = 0; i < num_ops; ) {
 CSGCommand cmd = commands[i];
