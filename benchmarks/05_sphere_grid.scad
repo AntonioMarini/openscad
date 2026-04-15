@@ -2,7 +2,7 @@
 // Tests OBB culling (64 objects), span merging, and color interpolation.
 $fn = 5;
 
-N       = 6;
+N       = 10;
 spacing = 6;
 r       = 1.2;
 

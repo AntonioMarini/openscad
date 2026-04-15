@@ -176,13 +176,12 @@ public:
 
       // 2nd+ occurrences use CACHED_OPERATION so the shader tries cache first,
       // but falls back to children on miss (real eviction support)
-      CSGCommandType cmd_type = is_second_occurrence ? CSGCommandType::CACHED_OPERATION : CSGCommandType::OPERATION;
+      CSGCommandType cmd_type =
+        is_second_occurrence ? CSGCommandType::CACHED_OPERATION : CSGCommandType::OPERATION;
       CSGCommand cmd(cmd_type, op_id);
       cmd.skip_children = 0;
-      if (is_second_occurrence)
-        cmd.duplicate_id = second_dup_id;
-      else if (is_shared)
-        cmd.duplicate_id = node_duplicate_id[node.get()];
+      if (is_second_occurrence) cmd.duplicate_id = second_dup_id;
+      else if (is_shared) cmd.duplicate_id = node_duplicate_id[node.get()];
 
       commands.push_back(cmd);
       obbs.emplace_back();

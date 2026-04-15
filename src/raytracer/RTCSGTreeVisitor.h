@@ -28,7 +28,7 @@ public:
   std::shared_ptr<RTCSGNode> binarizeNaive(
     std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op);
   std::shared_ptr<RTCSGNode> binarizeKD(
-    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op, int depth);
+    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op);
 
   // Entry point — same pattern as CSGTreeEvaluator::buildCSGTree
   std::shared_ptr<RTCSGNode> buildRTTree(const AbstractNode& node);

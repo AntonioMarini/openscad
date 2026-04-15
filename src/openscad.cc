@@ -935,9 +935,7 @@ int openscad_main(int argc, char **argv)
 #ifndef OPENSCAD_NOGUI
   desc.add_options()("benchmark", "Enable raytracer benchmark mode (GUI only)")(
     "bench-steps", po::value<int>()->default_value(72), "Number of orbit steps")(
-    "bench-elevation", po::value<double>()->default_value(25.0), "Camera elevation in degrees")(
-    "bench-distance", po::value<double>()->default_value(-1.0),
-    "Orbit radius (-1 = use current camera distance)")("bench-output", po::value<std::string>(),
+    "bench-output", po::value<std::string>(),
                                                        "Output directory for benchmark results")(
     "rt-obb", po::value<int>()->default_value(1), "Enable OBB culling (0/1)")(
     "rt-cache", po::value<int>()->default_value(1), "Enable ray cache (0/1)")(
@@ -946,7 +944,8 @@ int openscad_main(int argc, char **argv)
     "rt-distribution", po::value<int>()->default_value(1), "Enable CSG distribution optimisation (0/1)")(
     "rt-binarization", po::value<int>()->default_value(1), "Binarization: 0=naive, 1=KD")(
     "bench-width",  po::value<int>()->default_value(0), "Force viewport width in pixels (0 = keep current)")(
-    "bench-height", po::value<int>()->default_value(0), "Force viewport height in pixels (0 = keep current)");
+    "bench-height", po::value<int>()->default_value(0), "Force viewport height in pixels (0 = keep current)")(
+    "bench-no-screenshot", "Skip saving the frame screenshot");
 #endif
 
   po::options_description hidden("Hidden options");
@@ -1214,16 +1213,15 @@ int openscad_main(int argc, char **argv)
     if (vm.count("benchmark")) {
       benchCfg.active = true;
       benchCfg.steps = vm["bench-steps"].as<int>();
-      benchCfg.elevation = vm["bench-elevation"].as<double>();
-      benchCfg.distance = vm["bench-distance"].as<double>();
       benchCfg.rtUseObb = vm["rt-obb"].as<int>();
       benchCfg.rtUseCache = vm["rt-cache"].as<int>();
       benchCfg.rtUseShadows = vm["rt-shadows"].as<int>();
       benchCfg.rtSamples = vm["rt-samples"].as<int>();
       benchCfg.rtUseDistribution = vm["rt-distribution"].as<int>();
       benchCfg.rtBinarization = vm["rt-binarization"].as<int>();
-      benchCfg.bench_width  = vm["bench-width"].as<int>();
-      benchCfg.bench_height = vm["bench-height"].as<int>();
+      benchCfg.bench_width     = vm["bench-width"].as<int>();
+      benchCfg.bench_height    = vm["bench-height"].as<int>();
+      benchCfg.skipScreenshot  = vm.count("bench-no-screenshot") > 0;
       if (vm.count("bench-output")) {
         benchCfg.output_dir = vm["bench-output"].as<std::string>();
       } else {

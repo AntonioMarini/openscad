@@ -1484,7 +1484,8 @@ void MainWindow::compileCSG()
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());  // Tree for raytracing view
     std::cout << "TREE: " << std::endl;
     printRTCSGTree(rtRoot);
-    std::cout << "Nodes before distribution: " << countRTCSGNodes(rtRoot) << std::endl;
+    int rtPreDistNodeCount = countRTCSGNodes(rtRoot);
+    std::cout << "Nodes before distribution: " << rtPreDistNodeCount << std::endl;
 
     std::cout << "\n\n\nDISTRIBUTED TREE: " << std::endl;
     if (!benchmarkConfig.active || benchmarkConfig.rtUseDistribution) {
@@ -1498,11 +1499,12 @@ void MainWindow::compileCSG()
 
     if (this->rtglview) {
       this->rtglview->setRTTree(this->rtRoot);
-      this->rtglview->setTreeStats(rtNodeCount, rtDepth);
+      this->rtglview->setTreeStats(rtNodeCount, rtDepth, rtPreDistNodeCount);
     }
 
     if (benchmarkConfig.active) {
       QTimer::singleShot(0, this, [this]() {
+        viewAll();
         if (!this->rtglview || !this->rtglview->isVisible()) {
           viewModeRaytracer();
         }

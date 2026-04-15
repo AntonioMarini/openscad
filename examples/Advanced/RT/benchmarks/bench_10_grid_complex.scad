@@ -27,7 +27,7 @@ module unit_cell(col) {
   }
 }
 
-N       = 5;
+N       = 20;
 spacing = 28;
 
 for (xi = [0:N-1])

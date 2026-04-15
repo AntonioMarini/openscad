@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-import argparse, csv, os, re, shutil, subprocess, sys, pathlib, datetime
+import argparse, csv, json, os, re, shutil, subprocess, sys, pathlib, datetime
 
 FIXED_CONFIGS = [
-    {"label": "Naive, no OBB",       "binarization": 0, "obb": 0, "cache": 0, "distribution": 0, "shadows": 1, "samples": 1},
-    {"label": "Naive, OBB",          "binarization": 0, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1, "samples": 1},
-    {"label": "KD, OBB",             "binarization": 1, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1, "samples": 1},
-    {"label": "KD, OBB, Dist+Cache", "binarization": 1, "obb": 1, "cache": 1, "distribution": 1, "shadows": 1, "samples": 1},
+    {"label": "Naive, no OBB",       "binarization": 0, "obb": 0, "cache": 0, "distribution": 0, "shadows": 1},
+    {"label": "Naive, OBB",          "binarization": 0, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1},
+    {"label": "KD, OBB",             "binarization": 1, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1},
+    {"label": "KD, OBB, Dist+Cache", "binarization": 1, "obb": 1, "cache": 1, "distribution": 1, "shadows": 1},
 ]
 
 BENCH_RE = re.compile(
@@ -47,44 +47,48 @@ def detect_gpu():
     return "Unknown"
 
 
-def run_model(model_path, cfg, args, runs_dir, ts):
+def run_model(model_path, cfg, args, runs_dir, ts, skip_screenshot=False):
     stem = model_path.stem
     safe = cfg["label"].replace(" ", "_").replace(",", "").replace("+", "")
     out = str(pathlib.Path(runs_dir) / f"{safe}_{ts}")
+    total_steps = args.steps + args.warmup
     cmd = [
         args.openscad,
         str(model_path),
         "--benchmark",
-        f"--bench-steps={args.steps}",
-        f"--bench-elevation={args.elevation}",
-        f"--bench-distance={args.distance}",
+        f"--bench-steps={total_steps}",
         f"--bench-output={out}",
         f"--rt-binarization={cfg['binarization']}",
         f"--rt-obb={cfg['obb']}",
         f"--rt-cache={cfg['cache']}",
         f"--rt-shadows={cfg['shadows']}",
-        f"--rt-samples={cfg['samples']}",
         f"--rt-distribution={cfg['distribution']}",
         f"--bench-width={args.width}",
         f"--bench-height={args.height}",
     ]
+    if skip_screenshot:
+        cmd.append("--bench-no-screenshot")
     print(f"\n[{stem}] [{cfg['label']}] Running: {' '.join(cmd)}")
+    if args.warmup > 0:
+        print(f"  (warmup: discarding first {args.warmup} frame(s))")
     env = os.environ.copy()
+    # XWayland + GLX: best path for NVIDIA compute shaders on Wayland
+    env.setdefault("DISPLAY", ":1")
+    env.setdefault("QT_QPA_PLATFORM", "xcb")
     env.setdefault("QT_XCB_GL_INTEGRATION", "xcb_glx")
+    # Disable vsync at the NVIDIA driver level
+    env["__GL_SYNC_TO_VBLANK"] = "0"
 
     proc = subprocess.Popen(
         cmd, env=env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
-    avg_fps = min_fps = max_fps = None
-    total_frames = node_count = tree_depth = render_w = render_h = None
+    node_count = tree_depth = render_w = render_h = None
     obb_skipped = cache_hits = cache_misses = None
     for line in proc.stdout:
         print(line, end="", flush=True)
         m = BENCH_RE.search(line)
         if m:
-            total_frames = int(m[1])
-            avg_fps, min_fps, max_fps = float(m[2]), float(m[3]), float(m[4])
             node_count, tree_depth = int(m[5]), int(m[6])
             render_w, render_h = int(m[7]), int(m[8])
             obb_skipped, cache_hits, cache_misses = int(m[9]), int(m[10]), int(m[11])
@@ -94,9 +98,30 @@ def run_model(model_path, cfg, args, runs_dir, ts):
     mpath = pathlib.Path(out) / "measurements.csv"
     if mpath.exists():
         with open(mpath) as f:
-            frames = list(csv.DictReader(f))
+            all_frames = list(csv.DictReader(f))
+        # Discard warmup frames; renumber steps from 1
+        frames = all_frames[args.warmup:]
+        for i, row in enumerate(frames):
+            row["step"] = str(i + 1)
+
+    # Recompute statistics from the kept frames
+    fps_values = [float(r["fps"]) for r in frames] if frames else []
+    avg_fps = sum(fps_values) / len(fps_values) if fps_values else None
+    min_fps = min(fps_values) if fps_values else None
+    max_fps = max(fps_values) if fps_values else None
+    total_frames = len(frames)
 
     screenshot = pathlib.Path(out) / "frame.png"
+
+    if node_count is not None:
+        stats_data = {
+            "node_count": node_count, "tree_depth": tree_depth,
+            "render_w": render_w, "render_h": render_h,
+            "obb_skipped": obb_skipped,
+            "cache_hits": cache_hits, "cache_misses": cache_misses,
+        }
+        with open(pathlib.Path(out) / "stats.json", "w") as f:
+            json.dump(stats_data, f)
 
     return (proc.returncode, avg_fps, min_fps, max_fps,
             total_frames, node_count, tree_depth, render_w, render_h,
@@ -109,13 +134,96 @@ def _cache_hit_rate(hits, misses):
     return f"{100.0 * hits / total:.1f}\\%" if total > 0 else "N/A"
 
 
-def _obb_skip_nodes(obb_skipped, render_w, render_h):
-    px = render_w * render_h if render_w and render_h else 0
-    return f"{obb_skipped / px:.2f}" if px else "N/A"
+def _obb_skip_nodes(obb_skipped, render_w, render_h, total_frames):
+    total = render_w * render_h * total_frames if (render_w and render_h and total_frames) else 0
+    return f"{obb_skipped / total:.2f}" if total else "N/A"
 
 
 def _tex_escape(s):
     return s.replace("_", "\\_").replace("&", "\\&").replace("%", "\\%")
+
+
+def write_summary_latex(out_dir, all_model_results, gpu):
+    path = pathlib.Path(out_dir) / "summary.tex"
+
+    # Collect resolution from first available result
+    render_w = render_h = None
+    for _stem, results in all_model_results:
+        if results:
+            render_w = results[0][2]["render_w"]
+            render_h = results[0][2]["render_h"]
+            break
+    res_str = f"${render_w}\\times{render_h}$" if render_w else "N/A"
+    gpu_tex = _tex_escape(gpu)
+
+    with open(path, "w") as f:
+        f.write("% Generated by benchmark.py\n")
+        f.write("% Requires booktabs, multirow in your preamble.\n\n")
+
+        f.write("\\begin{table}[htbp]\n")
+        f.write("  \\centering\\small\n")
+        f.write("  \\setlength{\\tabcolsep}{2pt}\n")
+        f.write(f"  \\caption{{Full benchmark summary. Resolution: {res_str}\\,px. GPU: {gpu_tex}.}}\n")
+        f.write("  \\label{tab:rt-summary}\n")
+        f.write("  \\begin{tabular}{@{}llrrrrrr@{}}\n")
+        f.write("    \\toprule\n")
+        f.write("    \\textbf{Model} & \\textbf{Config} & \\textbf{Nodes} & "
+                "\\textbf{Depth} & \\textbf{OBB skip/px} & "
+                "\\textbf{FPS min} & \\textbf{FPS avg} & \\textbf{FPS max} \\\\\n")
+        f.write("    \\midrule\n")
+
+        for i, (stem, results) in enumerate(all_model_results):
+            if not results:
+                continue
+            if i > 0:
+                f.write("    \\midrule\n")
+            stem_short = stem.split("_")[0]
+            for j, (cfg_label, _frames, stats, avg, mn, mx) in enumerate(results):
+                model_col = f"\\texttt{{{stem_short}}}" if j == 0 else ""
+                lbl = cfg_label.replace("+", "\\texttt{+}")
+                obb_str = _obb_skip_nodes(stats["obb_skipped"], stats["render_w"], stats["render_h"], stats["total_frames"])
+                f.write(f"    {model_col} & {lbl} & {stats['node_count']} & "
+                        f"{stats['tree_depth']} & {obb_str} & "
+                        f"{mn:.2f} & {avg:.2f} & {mx:.2f} \\\\\n")
+
+        f.write("    \\bottomrule\n")
+        f.write("  \\end{tabular}\n")
+        f.write("\\end{table}\n")
+
+    print(f"  Summary LaTeX: {path}")
+
+
+def write_scene_overview_latex(out_dir, all_model_results):
+    path = pathlib.Path(out_dir) / "scene_overview.tex"
+    with open(path, "w") as f:
+        f.write("% Generated by benchmark.py\n")
+        f.write("% Requires booktabs, graphicx, float in your preamble.\n\n")
+        f.write("\\begin{table}[H]\n")
+        f.write("  \\centering\\small\n")
+        f.write("  \\setlength{\\tabcolsep}{6pt}\n")
+        f.write("  \\caption{Models tested: model name, node count (before distribution), and preview.}\n")
+        f.write("  \\label{tab:rt-scene-overview}\n")
+        f.write("  \\begin{tabular}{@{}lrl@{}}\n")
+        f.write("    \\toprule\n")
+        f.write("    \\textbf{Model} & \\textbf{Nodes} & \\textbf{Preview} \\\\\n")
+        f.write("    \\midrule\n")
+        for stem, results in all_model_results:
+            if not results:
+                continue
+            stem_tex = _tex_escape(stem)
+            # Use node count from the first non-distribution config
+            nodes = next(
+                (s["node_count"] for lbl, _, s, _, _, _ in results
+                 if "Dist" not in lbl),
+                results[0][2]["node_count"]
+            )
+            img_path = f"{out_dir}/{stem}/frame.png"
+            f.write(f"    \\texttt{{{stem_tex}}} & {nodes} & "
+                    f"\\includegraphics[height=2.8cm]{{{img_path}}} \\\\\n")
+        f.write("    \\bottomrule\n")
+        f.write("  \\end{tabular}\n")
+        f.write("\\end{table}\n")
+    print(f"  Scene overview LaTeX: {path}")
 
 
 def write_model_csv(out_dir, results):
@@ -186,7 +294,7 @@ def write_model_latex(out_dir, stem, results, has_screenshot, gpu):
         f.write("    \\midrule\n")
         for cfg_label, _frames, stats, avg, mn, mx in results:
             lbl = cfg_label.replace("+", "\\texttt{+}")
-            obb_str = _obb_skip_nodes(stats["obb_skipped"], stats["render_w"], stats["render_h"])
+            obb_str = _obb_skip_nodes(stats["obb_skipped"], stats["render_w"], stats["render_h"], stats["total_frames"])
             hit_str = _cache_hit_rate(stats["cache_hits"], stats["cache_misses"])
             f.write(f"    {lbl} & {stats['tree_depth']} & {obb_str} & {hit_str}"
                     f" & {mn:.2f} & {avg:.2f} & {mx:.2f} \\\\\n")
@@ -226,8 +334,8 @@ def main():
     )
     p.add_argument("models", nargs="+", help=".scad file(s) or folder(s)")
     p.add_argument("--steps",     type=int,   default=6)
-    p.add_argument("--elevation", type=float, default=25.0)
-    p.add_argument("--distance",  type=float, default=-1.0)
+    p.add_argument("--warmup",    type=int,   default=2,
+                   help="Frames to render but discard before recording (default: 2)")
     p.add_argument("--width",     type=int,   default=1920, help="Viewport width in pixels")
     p.add_argument("--height",    type=int,   default=1080, help="Viewport height in pixels")
     p.add_argument("--output",    default="benchmark_results",
@@ -249,6 +357,7 @@ def main():
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     failed = []
+    all_model_results = []
 
     for model in models:
         stem = model.stem
@@ -262,10 +371,10 @@ def main():
         results = []
         screenshot_dst = None
 
-        for cfg in FIXED_CONFIGS:
+        for cfg_idx, cfg in enumerate(FIXED_CONFIGS):
             rc, avg, mn, mx, nframes, nodes, depth, render_w, render_h, \
                 obb_skipped, cache_hits, cache_misses, frames, shot = \
-                run_model(model, cfg, args, runs_dir, ts)
+                run_model(model, cfg, args, runs_dir, ts, skip_screenshot=cfg_idx > 0)
 
             if rc != 0 or avg is None:
                 failed.append(f"{stem} [{cfg['label']}]")
@@ -276,6 +385,7 @@ def main():
                 "render_w": render_w, "render_h": render_h,
                 "obb_skipped": obb_skipped,
                 "cache_hits": cache_hits, "cache_misses": cache_misses,
+                "total_frames": args.steps + args.warmup,
             }
             results.append((cfg["label"], frames, stats, avg, mn, mx))
 
@@ -290,6 +400,11 @@ def main():
         print(f"\n[{stem}] Writing Overleaf folder: {model_dir}/")
         write_model_csv(model_dir, results)
         write_model_latex(model_dir, stem, results, screenshot_dst is not None, gpu)
+        all_model_results.append((stem, results))
+
+    if all_model_results:
+        write_summary_latex(args.output, all_model_results, gpu)
+        write_scene_overview_latex(args.output, all_model_results)
 
     succeeded = total - len(failed)
     print(f"\nDone. {succeeded}/{total} succeeded.")

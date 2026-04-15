@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QKeyEvent>
+#include <QSurfaceFormat>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -25,6 +26,9 @@ static std::string loadShaderFile(const std::string& path)
 RTGLView::RTGLView(QWidget *parent) : QOpenGLWidget(parent)
 {
   setFocusPolicy(Qt::StrongFocus);  // to receive key events
+  QSurfaceFormat fmt = format();
+  fmt.setSwapInterval(0);  // disable vsync for uncapped benchmark FPS
+  setFormat(fmt);
 }
 
 RTGLView::~RTGLView()
@@ -57,8 +61,9 @@ float RTGLView::getDPI() { return devicePixelRatio(); }
 void RTGLView::initializeGL()
 {
   std::cout << "[RT] OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
-  std::string computeSrc = ShaderUtils::loadShaderSource("raytracer/raytracer.glsl");
-  computeProgram = compileComputeShader(computeSrc);
+  computeShaderSrc = ShaderUtils::loadShaderSource("raytracer/raytracer_span.glsl");
+  currentMaxStack = 8;
+  computeProgram = compileComputeShader(computeShaderSrc, currentMaxStack);
 
   // Quad shader — use OpenSCAD's utility
   std::string vertSrc = ShaderUtils::loadShaderSource("raytracer/base.vert");
@@ -186,8 +191,8 @@ void RTGLView::paintGL()
     needsRebuild = false;
   }
 
-  // Reset GPU stats at the start of the first measured frame (skip warmup, step 0)
-  if (benchConfig.active && benchStep == 1 && statsSSBO) {
+  // Reset GPU stats before each measured frame so per-frame values fit in uint32
+  if (benchConfig.active && benchStep >= 1 && statsSSBO) {
     const uint32_t zeros[3] = {0, 0, 0};
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
     glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), zeros);
@@ -195,28 +200,29 @@ void RTGLView::paintGL()
   }
 
   // ---- Compute shader ----
-  glUseProgram(computeProgram);
+  GLuint activeProgram = computeProgram;
+  glUseProgram(activeProgram);
 
   float aspectRatio = (float)w / (float)h;
-  glUniform1f(glGetUniformLocation(computeProgram, "fov"), fov);
-  glUniform1f(glGetUniformLocation(computeProgram, "aspectRatio"), aspectRatio);
-  glUniform3f(glGetUniformLocation(computeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_samples"), 4);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_rendering_mode"), 0);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_use_obb"), rtUseObb);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_use_cache"), rtUseCache);
-  glUniform1i(glGetUniformLocation(computeProgram, "u_use_shadows"), rtUseShadows);
+  glUniform1f(glGetUniformLocation(activeProgram, "fov"), fov);
+  glUniform1f(glGetUniformLocation(activeProgram, "aspectRatio"), aspectRatio);
+  glUniform3f(glGetUniformLocation(activeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_samples"), 1);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_rendering_mode"), 0);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_obb"), rtUseObb);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_cache"), rtUseCache);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_shadows"), 0);
 
   if (colorscheme) {
     Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
     Color4f defaultMatColor = ColorMap::getColor(*colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
 
-    glUniform3f(glGetUniformLocation(computeProgram, "u_background"), bg.r(), bg.g(), bg.b());
-    glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), defaultMatColor.r(),
+    glUniform3f(glGetUniformLocation(activeProgram, "u_background"), bg.r(), bg.g(), bg.b());
+    glUniform3f(glGetUniformLocation(activeProgram, "u_default_mat_color"), defaultMatColor.r(),
                 defaultMatColor.g(), defaultMatColor.b());
   } else {
-    glUniform3f(glGetUniformLocation(computeProgram, "u_background"), 0.5f, 0.7f, 1.0f);
-    glUniform3f(glGetUniformLocation(computeProgram, "u_default_mat_color"), 1.0f, 1.0f,
+    glUniform3f(glGetUniformLocation(activeProgram, "u_background"), 0.5f, 0.7f, 1.0f);
+    glUniform3f(glGetUniformLocation(activeProgram, "u_default_mat_color"), 1.0f, 1.0f,
                 1.0f);  // White fallback
   }
 
@@ -224,8 +230,8 @@ void RTGLView::paintGL()
   Eigen::Matrix4f invView = view.inverse();
   Eigen::Vector3f camPos = invView.block<3, 1>(0, 3);
 
-  glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_inv_view"), 1, GL_FALSE, invView.data());
-  glUniform3f(glGetUniformLocation(computeProgram, "u_camera_pos"), camPos.x(), camPos.y(), camPos.z());
+  glUniformMatrix4fv(glGetUniformLocation(activeProgram, "u_inv_view"), 1, GL_FALSE, invView.data());
+  glUniform3f(glGetUniformLocation(activeProgram, "u_camera_pos"), camPos.x(), camPos.y(), camPos.z());
 
   // Projection matrix — must match gluPerspective used for axes
   float dist = openscadCam->viewer_distance;
@@ -241,8 +247,8 @@ void RTGLView::paintGL()
   proj(2, 3) = -(2.0f * farP * nearP) / (farP - nearP);
   proj(3, 2) = -1.0f;
 
-  glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_view"), 1, GL_FALSE, view.data());
-  glUniformMatrix4fv(glGetUniformLocation(computeProgram, "u_proj"), 1, GL_FALSE, proj.data());
+  glUniformMatrix4fv(glGetUniformLocation(activeProgram, "u_view"), 1, GL_FALSE, view.data());
+  glUniformMatrix4fv(glGetUniformLocation(activeProgram, "u_proj"), 1, GL_FALSE, proj.data());
 
   // Bind SSBOs
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, primitivesSSBO);
@@ -254,6 +260,9 @@ void RTGLView::paintGL()
   // Bind output textures (color + depth)
   glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
   glBindImageTexture(1, depthTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+
+  // start benchmark timer
+  if (benchConfig.active && benchStep > 0) benchFrameTimer.start();
 
   // Dispatch
   glDispatchCompute(((w + 7) / 8), ((h + 7) / 8), 1);
@@ -326,23 +335,36 @@ void RTGLView::paintGL()
   showSmallaxes(axesColor);
   glEnable(GL_DEPTH_TEST);
 
-  glFinish();
+  glFinish();  // sync GPU — timer stops here
 
   if (benchConfig.active) {
     if (benchStep == 0) {
-      benchFrameTimer.start();  // warmup frame — just start the clock
+      // Capture screenshot at rot_degrees 0° (warmup frame) so the overview image
+      // shows a canonical front-facing view, unaffected by timing.
+      if (!benchConfig.skipScreenshot) {
+        grabFramebuffer().save(QString::fromStdString(benchConfig.output_dir + "/frame.png"));
+      }
+      benchScreenshotTaken = true;
     } else {
       float ms = benchFrameTimer.nsecsElapsed() / 1e6f;
       benchFrameMs.push_back(ms);
-      benchFrameTimer.restart();
-      if (!benchScreenshotTaken) {
-        grabFramebuffer().save(QString::fromStdString(benchConfig.output_dir + "/frame.png"));
-        benchScreenshotTaken = true;
+
+      // Read back per-frame GPU stats and accumulate as uint64_t to avoid overflow.
+      // SSBO was reset at the start of this frame, so values represent this frame only.
+      if (statsSSBO) {
+        glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        uint32_t gpuStats[3] = {0, 0, 0};
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), gpuStats);
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+        benchObbSkippedTotal += gpuStats[0];
+        benchCacheHitsTotal += gpuStats[1];
+        benchCacheMissesTotal += gpuStats[2];
       }
     }
     advanceBenchmarkStep();
   }
-  // update();
+  // update(); Uncomment this for continuous frame generetion intead of input directed
 }
 
 void RTGLView::setCamera(const Camera *cam)
@@ -356,7 +378,6 @@ void RTGLView::setCamera(const Camera *cam)
 
 void RTGLView::rebuildGPUData()
 {
-  // Flatten the tree — reuse your CSGTree logic
   std::vector<Primitive> gpuPrimitives;
   std::vector<Operation> gpuOperations;
   std::vector<CSGCommand> gpuCommands;
@@ -371,6 +392,22 @@ void RTGLView::rebuildGPUData()
   tree.countNodes(rtRoot);
 
   tree.flatten_tree(rtRoot, gpuPrimitives, gpuOperations, gpuCommands, gpuOBBs);
+
+  // Recompile shader if MAX_STACK needs to grow for this scene's tree depth.
+  // Use pre-distribution node count so that distribution doesn't inflate MAX_STACK:
+  int neededStack = 4;
+  {
+    int n = benchPreDistNodeCount > 0 ? benchPreDistNodeCount : static_cast<int>(gpuCommands.size());
+    while ((1 << neededStack) < n) neededStack++;
+    neededStack += 2;  // safety margin
+  }
+  if (neededStack != currentMaxStack) {
+    currentMaxStack = neededStack;
+    if (computeProgram) glDeleteProgram(computeProgram);
+    computeProgram = compileComputeShader(computeShaderSrc, currentMaxStack);
+    std::cout << "[RT] Recompiled shaders with MAX_STACK=" << currentMaxStack << " for "
+              << gpuCommands.size() << " commands" << std::endl;
+  }
 
   // Delete old SSBOs
   if (primitivesSSBO) glDeleteBuffers(1, &primitivesSSBO);
@@ -408,9 +445,16 @@ void RTGLView::rebuildGPUData()
 
 // ---- Shader compilation helpers ----
 
-GLuint RTGLView::compileComputeShader(const std::string& source)
+GLuint RTGLView::compileComputeShader(const std::string& source, int maxStack)
 {
-  const char *src = source.c_str();
+  // Inject #define MAX_STACK after the #version line so it overrides the shader default.
+  std::string patched = source;
+  auto nl = patched.find('\n');
+  if (nl != std::string::npos) {
+    patched.insert(nl + 1, "#define MAX_STACK " + std::to_string(maxStack) + "\n");
+  }
+
+  const char *src = patched.c_str();
   GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
   glShaderSource(shader, 1, &src, nullptr);
   glCompileShader(shader);
@@ -692,26 +736,26 @@ void RTGLView::setBenchmarkConfig(const BenchmarkConfig& cfg)
   rtSamples = cfg.rtSamples;
 }
 
-void RTGLView::setTreeStats(int nodeCount, int depth)
+void RTGLView::setTreeStats(int nodeCount, int depth, int preDistNodeCount)
 {
   benchNodeCount = nodeCount;
   benchTreeDepth = depth;
+  benchPreDistNodeCount = preDistNodeCount > 0 ? preDistNodeCount : nodeCount;
 }
 
 void RTGLView::startBenchmarkOrbit()
 {
   if (!openscadCam) return;
   benchmarkCam = *openscadCam;
-  benchmarkCam.object_rot.x() = benchConfig.elevation;
   benchmarkCam.object_rot.y() = 0.0;
-  if (benchConfig.distance > 0.0) {
-    benchmarkCam.viewer_distance = benchConfig.distance;
-  }
   openscadCam = &benchmarkCam;
 
   benchStep = 0;
   benchFrameMs.clear();
   benchScreenshotTaken = false;
+  benchObbSkippedTotal = 0;
+  benchCacheHitsTotal = 0;
+  benchCacheMissesTotal = 0;
 
   if (benchConfig.bench_width > 0 && benchConfig.bench_height > 0) {
     qreal dpr = devicePixelRatio();
@@ -757,12 +801,12 @@ void RTGLView::finishBenchmark()
   // Write CSV
   std::string csvPath = benchConfig.output_dir + "/measurements.csv";
   std::ofstream csv(csvPath);
-  csv << "step,azimuth_deg,frame_ms,fps\n";
+  csv << "step,rot_degrees,frame_ms,fps\n";
   for (int i = 0; i < static_cast<int>(benchFrameMs.size()); ++i) {
     float ms = benchFrameMs[i];
     float fps = ms > 0.0f ? 1000.0f / ms : 0.0f;
-    double azimuth = static_cast<double>(i + 1) * 360.0 / static_cast<double>(benchConfig.steps);
-    csv << (i + 1) << "," << azimuth << "," << ms << "," << fps << "\n";
+    double rot_degrees = static_cast<double>(i + 1) * 360.0 / static_cast<double>(benchConfig.steps);
+    csv << (i + 1) << "," << rot_degrees << "," << ms << "," << fps << "\n";
   }
   csv.close();
 
@@ -776,22 +820,14 @@ void RTGLView::finishBenchmark()
     float max_fps = min_ms > 0.0f ? 1000.0f / min_ms : 0.0f;
     float min_fps = max_ms > 0.0f ? 1000.0f / max_ms : 0.0f;
 
-    // Read back GPU stats
-    uint32_t gpuStats[3] = {0, 0, 0};
-    if (statsSSBO) {
-      glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-      glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
-      glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), gpuStats);
-      glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-    }
-
     const int px = width() * devicePixelRatio();
     const int py = height() * devicePixelRatio();
     std::cout << "[BENCH] total_frames=" << benchFrameMs.size() << " avg_fps=" << avg_fps
               << " min_fps=" << min_fps << " max_fps=" << max_fps << " node_count=" << benchNodeCount
               << " tree_depth=" << benchTreeDepth << " render_w=" << px << " render_h=" << py
-              << " obb_skipped=" << gpuStats[0] << " cache_hits=" << gpuStats[1]
-              << " cache_misses=" << gpuStats[2] << " output=" << benchConfig.output_dir << std::endl;
+              << " obb_skipped=" << benchObbSkippedTotal << " cache_hits=" << benchCacheHitsTotal
+              << " cache_misses=" << benchCacheMissesTotal << " output=" << benchConfig.output_dir
+              << std::endl;
   }
 
   QApplication::quit();
@@ -920,7 +956,7 @@ void RTGLView::mouseMoveEvent(QMouseEvent *event)
     // Rotation
     double rx = dx, ry = dy, rz = 0;
     if (buttonIndex == 0 && modifierIndex == 0) {
-      qglview->rotate(dy, dx, 0, true);
+      qglview->rotate(dy, 0, dx, true);
     }
     // Translation
     else if (buttonIndex == 2 && modifierIndex == 0) {

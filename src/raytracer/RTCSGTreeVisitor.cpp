@@ -7,6 +7,7 @@
 #include "core/primitives.h"
 
 #include <algorithm>
+#include <cfloat>
 
 static float deg2rad(float deg) { return deg * (3.14159265359f / 180.0f); }
 
@@ -52,12 +53,22 @@ Eigen::Vector3f RTCSGTreeVisitor::getCentroid(const std::shared_ptr<RTCSGNode>& 
 }
 
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
-  std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op, int depth = 0)
+  std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op)
 {
   if (children.size() == 1) return children[0];
   if (children.size() == 2) return std::make_shared<RTCSGNode>(op, children[0], children[1]);
 
-  int axis = depth % 3;
+  Eigen::Vector3f cmin(FLT_MAX, FLT_MAX, FLT_MAX);
+  Eigen::Vector3f cmax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+  for (const auto& child : children) {
+    Eigen::Vector3f c = getCentroid(child);
+    cmin = cmin.cwiseMin(c);
+    cmax = cmax.cwiseMax(c);
+  }
+  Eigen::Vector3f extent = cmax - cmin;
+  int axis = 0;
+  if (extent[1] > extent[axis]) axis = 1;
+  if (extent[2] > extent[axis]) axis = 2;
 
   std::sort(children.begin(), children.end(),
             [&](const auto& a, const auto& b) { return getCentroid(a)[axis] < getCentroid(b)[axis]; });
@@ -66,8 +77,7 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
   std::vector<std::shared_ptr<RTCSGNode>> left(children.begin(), children.begin() + mid);
   std::vector<std::shared_ptr<RTCSGNode>> right(children.begin() + mid, children.end());
 
-  return std::make_shared<RTCSGNode>(op, binarizeKD(left, op, depth + 1),
-                                     binarizeKD(right, op, depth + 1));
+  return std::make_shared<RTCSGNode>(op, binarizeKD(left, op), binarizeKD(right, op));
 }
 
 // ---- Entry point ----

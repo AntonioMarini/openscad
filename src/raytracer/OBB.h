@@ -23,6 +23,7 @@ struct alignas(16) OBB {
     std::vector<Eigen::Vector3f> getCorners() const;
 
     static OBB buildPrimitiveOBB(const RTCSGNode& node);
+    static OBB buildPrimitiveAABB(const RTCSGNode& node);
     static OBB buildOperationOBB(OperationType optype, const OBB& leftOBB, const OBB& rightOBB);
     static Eigen::Vector3f half_sizes(PrimitiveType ptype);
 };

@@ -50,7 +50,7 @@ public:
 
   void setBenchmarkConfig(const BenchmarkConfig& cfg);
   void startBenchmarkOrbit();
-  void setTreeStats(int nodeCount, int depth);
+  void setTreeStats(int nodeCount, int depth, int preDistNodeCount = 0);
 
 protected:
   void initializeGL() override;
@@ -60,7 +60,7 @@ protected:
 
 private:
   void rebuildGPUData();
-  GLuint compileComputeShader(const std::string& source);
+  GLuint compileComputeShader(const std::string& source, int maxStack);
   GLuint compileQuadShader(const std::string& vertSrc, const std::string& fragSrc);
 
   QElapsedTimer fpsTimer;
@@ -68,16 +68,19 @@ private:
   float currentFps = 0.0f;
 
   // Configurable shader uniforms
-  int rtUseObb = 1, rtUseCache = 1, rtUseShadows = 1, rtSamples = 1;
-
+  int   rtUseObb = 1, rtUseCache = 1, rtUseShadows = 1, rtSamples = 1;
   // Benchmark orbit state
   BenchmarkConfig benchConfig;
   int benchNodeCount = 0;
   int benchTreeDepth = 0;
+  int benchPreDistNodeCount = 0;
   Camera benchmarkCam;
   int benchStep = 0;
   bool benchScreenshotTaken = false;
   std::vector<float> benchFrameMs;
+  uint64_t benchObbSkippedTotal  = 0;
+  uint64_t benchCacheHitsTotal   = 0;
+  uint64_t benchCacheMissesTotal = 0;
   QTimer *benchTimer = nullptr;
   QElapsedTimer benchFrameTimer;
 
@@ -121,6 +124,10 @@ private:
   GLuint statsSSBO = 0;
 
   bool initialized = false;
+
+  // Compute shader source and current MAX_STACK compile-time constant
+  std::string computeShaderSrc;
+  int currentMaxStack = 0;
 
   // Camera (simple for now)
   Eigen::Vector3f camPos{0.0f, 0.0f, 3.0f};
