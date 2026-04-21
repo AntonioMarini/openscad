@@ -7,11 +7,14 @@
 
 #include <vector>
 #include <memory>
+#include <algorithm>
+#include <cfloat>
 
-#include "OBB.h"
+#include "RTBounds.h"
 #include "Primitive.h"
 #include "Operation.h"
 #include "CSGCommand.h"
+#include "DNFData.h"
 #include <iostream>
 #include <map>
 
@@ -121,7 +124,7 @@ public:
 
   unsigned int flatten_tree(std::shared_ptr<RTCSGNode> node, std::vector<Primitive>& primitives,
                             std::vector<Operation>& operations, std::vector<CSGCommand>& commands,
-                            std::vector<OBB>& obbs)
+                            std::vector<RTBounds>& bounds)
   {
     if (!node) return 0xFFFFFFFF;
 
@@ -140,7 +143,7 @@ public:
           cache_ref_cmd.duplicate_id = dup_it->second;
           auto cache_ref_cmd_id = (unsigned int)commands.size();
           commands.push_back(cache_ref_cmd);
-          obbs.push_back(obbs[node_first_cmd_id[node.get()]]);
+          bounds.push_back(bounds[node_first_cmd_id[node.get()]]);
           return cache_ref_cmd_id;
         }
         // Operation: fall through to emit full subtree so the shader can recompute on cache miss
@@ -168,7 +171,7 @@ public:
       }
 
       commands.push_back(cmd);
-      obbs.push_back(OBB::buildPrimitiveOBB(*node));
+      bounds.push_back(RTBounds::buildPrimitiveBounds(*node));
     } else {
       Operation op(node->op, 0, 0);
       auto op_id = (unsigned int)operations.size();
@@ -178,19 +181,20 @@ public:
       // but falls back to children on miss (real eviction support)
       CSGCommandType cmd_type =
         is_second_occurrence ? CSGCommandType::CACHED_OPERATION : CSGCommandType::OPERATION;
+
       CSGCommand cmd(cmd_type, op_id);
       cmd.skip_children = 0;
       if (is_second_occurrence) cmd.duplicate_id = second_dup_id;
       else if (is_shared) cmd.duplicate_id = node_duplicate_id[node.get()];
 
       commands.push_back(cmd);
-      obbs.emplace_back();
+      bounds.emplace_back();
 
-      unsigned int left_id = flatten_tree(node->left, primitives, operations, commands, obbs);
-      unsigned int right_id = flatten_tree(node->right, primitives, operations, commands, obbs);
+      unsigned int left_id = flatten_tree(node->left, primitives, operations, commands, bounds);
+      unsigned int right_id = flatten_tree(node->right, primitives, operations, commands, bounds);
 
       commands[cmd_id].skip_children = (unsigned int)commands.size() - cmd_id;
-      obbs[cmd_id] = OBB::buildOperationOBB(node->op, obbs[left_id], obbs[right_id]);
+      bounds[cmd_id] = RTBounds::buildOperationBounds(node->op, bounds[left_id], bounds[right_id]);
       operations[op_id].left_id = left_id;
       operations[op_id].right_id = right_id;
     }
@@ -221,12 +225,191 @@ public:
       std::cout << "Primitive: " << static_cast<int>(node->primitive) << " "
                 << printPrimitive(node->primitive) << ", Color: (" << node->color.x() << ", "
                 << node->color.y() << ", " << node->color.z() << ")\n";
-      // print_matrix(node->transform);
     } else {
       std::cout << "Operation: " << static_cast<int>(node->op) << "\n";
       print_tree(node->left, depth + 1);
       print_tree(node->right, depth + 1);
     }
+  }
+
+  // --- DNF (Goldfeather) flatten ---
+
+  // Collect products in the tree in a flat vector
+  static void collect_products(const std::shared_ptr<RTCSGNode>& node,
+                               std::vector<std::shared_ptr<RTCSGNode>>& products)
+  {
+    if (!node) return;
+    if (node->op == OperationType::UNION) {
+      collect_products(node->left, products);
+      collect_products(node->right, products);
+    } else {
+      products.push_back(node);
+    }
+  }
+
+  // Recursively flatten one product subtree into ProductCommand[].
+  // Returns the cmd_id of the root command; sets out_bounds to the root bounds.
+  // prim_cache is shared across all products to avoid duplicate Primitive entries.
+  static uint32_t flatten_product(const std::shared_ptr<RTCSGNode>& node,
+                                  std::vector<Primitive>& primitives, std::vector<Operation>& operations,
+                                  std::vector<ProductCommand>& commands,
+                                  std::map<RTCSGNode *, uint32_t>& prim_cache, RTBounds& out_bounds)
+  {
+    auto cmd_id = (uint32_t)commands.size();
+    ProductCommand cmd{};
+
+    if (node->is_leaf()) {
+      auto it = prim_cache.find(node.get());
+      uint32_t prim_id;
+      if (it != prim_cache.end()) {
+        prim_id = it->second;
+      } else {
+        prim_id = (uint32_t)primitives.size();
+        primitives.emplace_back(node->primitive, node->color, node->transform, node->r1, node->r2);
+        prim_cache[node.get()] = prim_id;
+      }
+      out_bounds = RTBounds::buildPrimitiveBounds(*node);
+      cmd.type = 0;  // PRIMITIVE
+      cmd.id = prim_id;
+      cmd.skip_children = 1;
+      cmd.bounds_skip = out_bounds.skip ? 1u : 0u;
+      cmd.bounds_type = out_bounds.skip ? 1u : out_bounds.bounds_type;
+      cmd.bounds_inv = out_bounds.skip ? Eigen::Matrix4f::Zero() : out_bounds.inv_transform;
+      commands.push_back(cmd);
+    } else {
+      auto op_id = (uint32_t)operations.size();
+      operations.emplace_back(node->op, 0u, 0u);
+
+      cmd.type = 1;  // OPERATION
+      cmd.id = op_id;
+      cmd.skip_children = 0;    // back-filled after recursion
+      commands.push_back(cmd);  // placeholder
+
+      RTBounds left_bounds, right_bounds;
+      uint32_t left_id =
+        flatten_product(node->left, primitives, operations, commands, prim_cache, left_bounds);
+      uint32_t right_id =
+        flatten_product(node->right, primitives, operations, commands, prim_cache, right_bounds);
+
+      operations[op_id].left_id = left_id;
+      operations[op_id].right_id = right_id;
+      commands[cmd_id].skip_children = (uint32_t)commands.size() - cmd_id;
+      out_bounds = RTBounds::buildOperationBounds(node->op, left_bounds, right_bounds);
+      commands[cmd_id].bounds_skip = out_bounds.skip ? 1u : 0u;
+      commands[cmd_id].bounds_type = out_bounds.skip ? 1u : out_bounds.bounds_type;
+      commands[cmd_id].bounds_inv = out_bounds.skip ? Eigen::Matrix4f::Zero() : out_bounds.inv_transform;
+    }
+
+    return cmd_id;
+  }
+
+  // Returns the world-space center of the bounds volume.
+  static Eigen::Vector3f boundsCenter(const RTBounds& bb)
+  {
+    if (bb.bounds_type == 0) {  // AABB
+      return (bb.inv_transform.col(0).head<3>() + bb.inv_transform.col(1).head<3>()) * 0.5f;
+    }
+    // OBB: center is the origin of the local frame in world coords
+    return bb.inv_transform.inverse().col(3).head<3>();
+  }
+
+  // Temporary struct for BVH construction
+  struct FlatProduct {
+    uint32_t cmd_start;
+    uint32_t cmd_count;
+    RTBounds bounds;
+    Eigen::Vector3f centroid;
+  };
+
+  // Recursive KD BVH builder over a range of FlatProducts.
+  // Appends nodes to bvh_nodes in preorder (for traversing in gpu later).
+  // Returns the combined bounds of the subtree (used by parent for union computation).
+  static RTBounds buildProductBVH(std::vector<FlatProduct>& products, int begin, int end,
+                                  std::vector<ProductBVHNode>& bvh_nodes)
+  {
+    auto curr_id = (uint32_t)bvh_nodes.size();
+    bvh_nodes.emplace_back();  // placeholder, filled in below
+
+    if (end - begin == 1) {  // LEAF
+      const FlatProduct& fp = products[begin];
+      ProductBVHNode& node = bvh_nodes[curr_id];
+
+      // fill the placeholder data
+      node.is_leaf = 1;
+      node.skip_children = 1;
+      node.bounds_skip = fp.bounds.skip;
+      node.bounds_type = fp.bounds.skip ? 1u : fp.bounds.bounds_type;
+      node.cmd_start = fp.cmd_start;
+      node.cmd_count = fp.cmd_count;
+      node.bounds_inv = fp.bounds.skip ? Eigen::Matrix4f::Zero() : fp.bounds.inv_transform;
+      return fp.bounds;
+    }
+
+    // KD split: find the axis with the largest centroid extent
+    Eigen::Vector3f cmin(FLT_MAX, FLT_MAX, FLT_MAX);
+    Eigen::Vector3f cmax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+    for (int i = begin; i < end; ++i) {
+      cmin = cmin.cwiseMin(products[i].centroid);
+      cmax = cmax.cwiseMax(products[i].centroid);
+    }
+    Eigen::Vector3f extent = cmax - cmin;
+    int axis = 0;
+    if (extent[1] > extent[axis]) axis = 1;
+    if (extent[2] > extent[axis]) axis = 2;
+
+    int mid = (begin + end) / 2;
+    std::nth_element(products.begin() + begin, products.begin() + mid, products.begin() + end,
+                     [axis](const FlatProduct& a, const FlatProduct& b) {
+                       return a.centroid[axis] < b.centroid[axis];
+                     });
+
+    RTBounds left_bounds = buildProductBVH(products, begin, mid, bvh_nodes);
+    RTBounds right_bounds = buildProductBVH(products, mid, end, bvh_nodes);
+
+    RTBounds combined = RTBounds::buildOperationBounds(OperationType::UNION, left_bounds, right_bounds);
+    uint32_t subtree_count = (uint32_t)bvh_nodes.size() - curr_id;
+
+    ProductBVHNode& node = bvh_nodes[curr_id];
+    node.is_leaf = 0;
+    node.skip_children = subtree_count;
+    node.bounds_skip = combined.skip;
+    node.bounds_type = combined.skip ? 1u : combined.bounds_type;
+    node.cmd_start = 0;
+    node.cmd_count = 0;
+    node.bounds_inv = combined.skip ? Eigen::Matrix4f::Zero() : combined.inv_transform;
+
+    return combined;
+  }
+
+  // Flatten the entire tree into DNF (sum-of-products) with a KD BVH over the products.
+  // Assumes distributeOperation() has NOT been called for the DNF path.
+  void flatten_to_dnf(const std::shared_ptr<RTCSGNode>& node, std::vector<Primitive>& primitives,
+                      std::vector<Operation>& operations, std::vector<ProductCommand>& product_commands,
+                      std::vector<ProductBVHNode>& bvh_nodes)
+  {
+    std::vector<std::shared_ptr<RTCSGNode>> products;
+    collect_products(node, products);
+    if (products.empty()) return;
+
+    std::map<RTCSGNode *, uint32_t> prim_cache;
+
+    // Step 1: flatten each product into product_commands[], collecting its root bounds
+    std::vector<FlatProduct> flat;
+    flat.reserve(products.size());
+    for (auto& prod_root : products) {
+      auto cmd_start = (uint32_t)product_commands.size();
+      RTBounds root_bounds;
+      flatten_product(prod_root, primitives, operations, product_commands, prim_cache, root_bounds);
+      FlatProduct fp;
+      fp.cmd_start = cmd_start;
+      fp.cmd_count = (uint32_t)product_commands.size() - cmd_start;
+      fp.bounds = root_bounds;
+      fp.centroid = boundsCenter(root_bounds);
+      flat.push_back(std::move(fp));
+    }
+
+    // Step 2: build KD BVH over flat products
+    buildProductBVH(flat, 0, (int)flat.size(), bvh_nodes);
   }
 };
 #endif  // !CSG_TREE_H

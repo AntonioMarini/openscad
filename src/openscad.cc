@@ -937,12 +937,13 @@ int openscad_main(int argc, char **argv)
     "bench-steps", po::value<int>()->default_value(72), "Number of orbit steps")(
     "bench-output", po::value<std::string>(),
                                                        "Output directory for benchmark results")(
-    "rt-obb", po::value<int>()->default_value(1), "Enable OBB culling (0/1)")(
+    "rt-bounds", po::value<int>()->default_value(1), "Enable bounds culling (0/1)")(
     "rt-cache", po::value<int>()->default_value(1), "Enable ray cache (0/1)")(
     "rt-shadows", po::value<int>()->default_value(1), "Enable shadow rays (0/1)")(
     "rt-samples", po::value<int>()->default_value(1), "Samples per pixel")(
     "rt-distribution", po::value<int>()->default_value(1), "Enable CSG distribution optimisation (0/1)")(
     "rt-binarization", po::value<int>()->default_value(1), "Binarization: 0=naive, 1=KD")(
+    "rt-dnf", po::value<int>()->default_value(1), "Use DNF (Goldfeather) shader path (0/1)")(
     "bench-width",  po::value<int>()->default_value(0), "Force viewport width in pixels (0 = keep current)")(
     "bench-height", po::value<int>()->default_value(0), "Force viewport height in pixels (0 = keep current)")(
     "bench-no-screenshot", "Skip saving the frame screenshot");
@@ -1210,15 +1211,17 @@ int openscad_main(int argc, char **argv)
     }
     auto reset_window_settings = vm.count("reset-window-settings") > 0;
     BenchmarkConfig benchCfg;
+    benchCfg.rtUseDNF = vm["rt-dnf"].as<int>(); // applies in both normal and benchmark mode
     if (vm.count("benchmark")) {
       benchCfg.active = true;
       benchCfg.steps = vm["bench-steps"].as<int>();
-      benchCfg.rtUseObb = vm["rt-obb"].as<int>();
+      benchCfg.rtUseBounds = vm["rt-bounds"].as<int>();
       benchCfg.rtUseCache = vm["rt-cache"].as<int>();
       benchCfg.rtUseShadows = vm["rt-shadows"].as<int>();
       benchCfg.rtSamples = vm["rt-samples"].as<int>();
       benchCfg.rtUseDistribution = vm["rt-distribution"].as<int>();
       benchCfg.rtBinarization = vm["rt-binarization"].as<int>();
+      benchCfg.rtUseDNF = vm["rt-dnf"].as<int>();
       benchCfg.bench_width     = vm["bench-width"].as<int>();
       benchCfg.bench_height    = vm["bench-height"].as<int>();
       benchCfg.skipScreenshot  = vm.count("bench-no-screenshot") > 0;

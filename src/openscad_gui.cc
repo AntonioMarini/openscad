@@ -286,9 +286,9 @@ int gui(std::vector<std::string>& inputFiles, const std::filesystem::path& origi
     inputFilesList.append(assemblePath(original_path, infile));
   }
   auto *mw = new MainWindow(inputFilesList);
+  mw->setBenchmarkConfig(benchmarkConfig);
   if (benchmarkConfig.active) {
     std::cout << "BENCHMARK ACTIVE" << std::endl;
-    mw->setBenchmarkConfig(benchmarkConfig);
   }
   QObject::connect(&app, &QCoreApplication::aboutToQuit, []() {
     QSettingsCached{}.release();

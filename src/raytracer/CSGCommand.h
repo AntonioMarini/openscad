@@ -8,7 +8,7 @@ enum class CSGCommandType : unsigned int {
   CACHED_PRIMITIVE = 3,
 };
 
-// OBB data lives in a separate GPU buffer (obbsSSBO, binding=4)
+// Bounds data lives in a separate GPU buffer (boundsSSBO, binding=4)
 struct alignas(16) CSGCommand {
   unsigned int type;           // 4 bytes
   unsigned int id;             // 4 bytes

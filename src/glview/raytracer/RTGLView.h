@@ -51,6 +51,7 @@ public:
   void setBenchmarkConfig(const BenchmarkConfig& cfg);
   void startBenchmarkOrbit();
   void setTreeStats(int nodeCount, int depth, int preDistNodeCount = 0);
+  void setUseDNF(bool dnf) { useDNF = dnf; needsRebuild = true; }
 
 protected:
   void initializeGL() override;
@@ -68,7 +69,7 @@ private:
   float currentFps = 0.0f;
 
   // Configurable shader uniforms
-  int   rtUseObb = 1, rtUseCache = 1, rtUseShadows = 1, rtSamples = 1;
+  int   rtUseBounds = 1, rtUseCache = 1, rtUseShadows = 1, rtSamples = 1;
   // Benchmark orbit state
   BenchmarkConfig benchConfig;
   int benchNodeCount = 0;
@@ -78,9 +79,11 @@ private:
   int benchStep = 0;
   bool benchScreenshotTaken = false;
   std::vector<float> benchFrameMs;
-  uint64_t benchObbSkippedTotal  = 0;
-  uint64_t benchCacheHitsTotal   = 0;
-  uint64_t benchCacheMissesTotal = 0;
+  uint64_t benchBoundsSkippedTotal = 0;
+  uint64_t benchCacheHitsTotal     = 0;
+  uint64_t benchCacheMissesTotal   = 0;
+  uint64_t benchNodesVisitedTotal  = 0;
+  uint64_t benchLeavesVisitedTotal = 0;
   QTimer *benchTimer = nullptr;
   QElapsedTimer benchFrameTimer;
 
@@ -117,16 +120,24 @@ private:
   GLuint outputTexture = 0;
   GLuint depthTexture = 0;
   GLuint quadVAO = 0, quadVBO = 0;
+  // span shader: bindings 1-4 geometry, 5 stats
   GLuint primitivesSSBO = 0;
   GLuint operationsSSBO = 0;
   GLuint commandsSSBO = 0;
-  GLuint obbsSSBO = 0;
+  GLuint boundsSSBO = 0;
+  // DNF shader: bindings 3-4 replace commands/obbs with product BVH/commands
+  GLuint dnfComputeProgram = 0;
+  GLuint productBVHSSBO = 0;
+  GLuint productCommandsSSBO = 0;
+  // binding 5: stats (shared by both paths)
   GLuint statsSSBO = 0;
 
   bool initialized = false;
+  bool useDNF = false;
 
   // Compute shader source and current MAX_STACK compile-time constant
   std::string computeShaderSrc;
+  std::string dnfComputeShaderSrc;
   int currentMaxStack = 0;
 
   // Camera (simple for now)

@@ -10,6 +10,8 @@
 
 #include <list>
 #include <map>
+#include <memory>
+#include <vector>
 
 /***
  * Used for traversing an abstract tree and provide a RTCSGNode struct reasy for raytracer
@@ -23,17 +25,17 @@ public:
   Response visit(State& state, const TransformNode& node) override;
   Response visit(State& state, const ColorNode& node) override;
 
-
   // Binarize balanced methods for lists of childrens
-  std::shared_ptr<RTCSGNode> binarizeNaive(
-    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op);
-  std::shared_ptr<RTCSGNode> binarizeKD(
-    std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op);
+  std::shared_ptr<RTCSGNode> binarizeNaive(std::vector<std::shared_ptr<RTCSGNode>>& children,
+                                           OperationType op);
+  std::shared_ptr<RTCSGNode> binarizeKD(std::vector<std::shared_ptr<RTCSGNode>>& children,
+                                        OperationType op);
 
   // Entry point — same pattern as CSGTreeEvaluator::buildCSGTree
   std::shared_ptr<RTCSGNode> buildRTTree(const AbstractNode& node);
 
-  // Method used for distributing operations other than unions. Leaving all the unions on top of the tree.
+  // Method used for distributing operations other than unions. Leaving all the unions on top of the
+  // tree.
   std::shared_ptr<RTCSGNode> distributeOperation(std::shared_ptr<RTCSGNode> node);
 
   // Getter for the result

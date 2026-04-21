@@ -126,7 +126,7 @@ add_executable(OpenSCADExe src/main_wrapper.cc
         src/raytracer/RTCSGNode.h
         src/glview/raytracer/RTGLView.h
         src/glview/raytracer/RTGLView.cpp
-        src/raytracer/OBB.cpp)
+        src/raytracer/RTBounds.cpp)
 set_target_properties(OpenSCADExe PROPERTIES AUTOMOC ON)
 if (APPLE)
   set_target_properties(OpenSCADExe PROPERTIES

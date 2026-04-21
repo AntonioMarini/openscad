@@ -1481,18 +1481,19 @@ void MainWindow::compileCSG()
       Eigen::Vector3f(defaultMatColor.r(), defaultMatColor.g(), defaultMatColor.b()));
     rtVisitor.setBinarizationMethod(benchmarkConfig.rtBinarization);
 
-    this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());  // Tree for raytracing view
-    std::cout << "TREE: " << std::endl;
-    printRTCSGTree(rtRoot);
+    this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());
     int rtPreDistNodeCount = countRTCSGNodes(rtRoot);
-    std::cout << "Nodes before distribution: " << rtPreDistNodeCount << std::endl;
+    std::cout << "[RT] Nodes before distribution: " << rtPreDistNodeCount << std::endl;
 
-    std::cout << "\n\n\nDISTRIBUTED TREE: " << std::endl;
-    if (!benchmarkConfig.active || benchmarkConfig.rtUseDistribution) {
+    // In benchmark mode: rtUseDistribution controls distribution, regardless of DNF path.
+    // In normal interactive mode: distribute only when not using DNF (current behavior).
+    bool shouldDistribute = benchmarkConfig.active
+      ? (benchmarkConfig.rtUseDistribution != 0)
+      : !benchmarkConfig.rtUseDNF;
+    if (shouldDistribute) {
       this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
     }
-    printRTCSGTree(rtRoot);
-    std::cout << "Nodes after distribution: " << countRTCSGNodes(rtRoot) << std::endl;
+    std::cout << "[RT] Nodes after distribution: " << countRTCSGNodes(rtRoot) << std::endl;
 
     int rtNodeCount = countRTCSGNodes(rtRoot);
     int rtDepth = treeDepth(rtRoot);
@@ -3160,7 +3161,7 @@ void MainWindow::viewModeRaytracer()
     // Swap: hide OpenCSG view, show RT view in same position
     this->rtglview->setGeometry(this->qglview->geometry());
     this->rtglview->makeCurrent();
-    this->rtglview->needsRebuild = true;
+    this->rtglview->setUseDNF(benchmarkConfig.rtUseDNF != 0);
     this->rtglview->setRTTree(this->rtRoot);
     this->rtglview->setTreeStats(countRTCSGNodes(this->rtRoot), treeDepth(this->rtRoot));
     this->qglview->hide();

@@ -5,9 +5,10 @@
 #include "core/CsgOpNode.h"
 #include "core/TransformNode.h"
 #include "core/primitives.h"
-
 #include <algorithm>
 #include <cfloat>
+#include <memory>
+#include <vector>
 
 static float deg2rad(float deg) { return deg * (3.14159265359f / 180.0f); }
 
@@ -41,15 +42,23 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeNaive(
   return std::make_shared<RTCSGNode>(op, leftNode, rightNode);
 }
 
+// Returns {sum_of_leaf_positions, leaf_count} so the caller can compute
+// the true mean (= sum / count) weighted equally per leaf.
+static std::pair<Eigen::Vector3f, int>
+getCentroidWeighted(const std::shared_ptr<RTCSGNode>& node)
+{
+  if (!node) return {Eigen::Vector3f::Zero(), 0};
+  if (node->is_leaf()) return {node->transform.col(3).head<3>(), 1};
+  auto [ls, lc] = getCentroidWeighted(node->left);
+  auto [rs, rc] = getCentroidWeighted(node->right);
+  return {ls + rs, lc + rc};
+}
+
 Eigen::Vector3f RTCSGTreeVisitor::getCentroid(const std::shared_ptr<RTCSGNode>& node)
 {
-  if (!node) return Eigen::Vector3f::Zero();
-  if (node->is_leaf()) {
-    return node->transform.col(3).head<3>();
-  }
-  Eigen::Vector3f left = getCentroid(node->left);
-  Eigen::Vector3f right = getCentroid(node->right);
-  return (left + right) * 0.5f;
+  auto [sum, count] = getCentroidWeighted(node);
+  if (count == 0) return Eigen::Vector3f::Zero();
+  return sum / static_cast<float>(count);
 }
 
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
@@ -136,9 +145,8 @@ void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, O
   } else {
     // Union and Intersection are commutative -> balanced binarization (TODO: make binarization method
     // dynamic)
-    this->stored_term[node.index()] = useKDBinarization
-        ? binarizeKD(validChildren, op)
-        : binarizeNaive(validChildren, op);
+    this->stored_term[node.index()] =
+      useKDBinarization ? binarizeKD(validChildren, op) : binarizeNaive(validChildren, op);
   }
 }
 
@@ -275,15 +283,18 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr
   node->left = distributeOperation(node->left);
   node->right = distributeOperation(node->right);
 
+  // 1) (A U B) int. C -> (A int. C) U (B int. C)
+  // 2) A int (B U C) -> (A int. B) U (A int. C)
+  // 3) (A U B) \ C -> (A \ C) U (B \ C)
+  // 4) A \ (B int. C) -> (A \ B) U (A \ C)
+  // 5) A \ (B \ C) -> (A \ B) U (A int. C)
+  // NOTE: A \ (B U C) is intentionally NOT transformed. The equivalent rewrite
+  // (A\B)\C would destroy any balanced union structure on the right, turning a
+  // shallow balanced tree into a deep chain and eliminating OBB culling benefits.
+
   bool changed = true;
   while (changed) {
     changed = false;
-
-    // 1) (A U B) int. C -> (A int. C) U (B int. C)
-    // 2) A int (B U C) -> (A int. B) U (A int. C)
-    // 3) (A U B) \ C -> (A \ C) U (B \ C)
-    // 4) A \ (B int. C) -> (A \ B) U (A \ C)
-    // 5) A \ (B \ C) -> (A \ B) U (A int. C)
 
     if (node->op == OperationType::INTERSECTION && node->left->op == OperationType::UNION) {  // 1)
 

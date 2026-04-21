@@ -44,7 +44,7 @@ uniform float aspectRatio;
 uniform vec3 u_light_dir;
 uniform vec3 u_background;
 uniform vec3 u_default_mat_color;
-uniform int u_use_obb;
+uniform int u_use_bounds;
 uniform int u_use_cache;
 uniform int u_use_shadows;
 
@@ -72,10 +72,11 @@ struct CSGCommand {
   uint duplicate_id;
 };
 
-struct OBBData {
-  mat4 inv_transform;
+struct BoundsData {
+  mat4 inv_transform;  // OBB inv-transform, OR col(0).xyz=min/col(1).xyz=max for AABB
   uint skip;
-  uint _pad[3];
+  uint bounds_type;    // 0 = AABB (slab test), 1 = OBB (matrix test)
+  uint _pad[2];
 };
 
 // SSBO
@@ -88,13 +89,16 @@ layout(std430, binding = 2) readonly buffer OperationsBuffer {
 layout(std430, binding = 3) readonly buffer CommandsBuffer {
   CSGCommand commands[];
 };
-layout(std430, binding = 4) readonly buffer OBBBuffer {
-  OBBData obbs[];
+layout(std430, binding = 4) readonly buffer BoundsBuffer {
+  BoundsData bounds[];
 };
+
 layout(std430, binding = 5) buffer StatsBuffer {
-  uint obb_skipped;
+  uint bounds_skipped;
   uint cache_hits;
   uint cache_misses;
+  uint nodes_visited;
+  uint leaves_visited;
 };
 
 struct span {
@@ -250,21 +254,33 @@ float wireframe_box(vec3 ray_orig, vec3 ray_dir, vec3 b_min, vec3 b_max) {
   return 0.0;
 }
 
-bool intersect_obb(vec3 ray_orig, vec3 ray_dir, mat4 inv_transform) {
+bool intersect_oriented(vec3 ray_orig, vec3 ray_dir, mat4 inv_transform) {
   vec3 local_orig = (inv_transform * vec4(ray_orig, 1.0)).xyz;
-  vec3 local_dir = (inv_transform * vec4(ray_dir, 0.0)).xyz;
-  vec3 inv_dir = 1.0 / (local_dir + vec3(1e-6));
-
-  float margin = 1.01; // 1% margin
-  vec3 t0 = (vec3(-margin) - local_orig) * inv_dir;
-  vec3 t1 = (vec3(margin) - local_orig) * inv_dir;
+  vec3 local_dir  = (inv_transform * vec4(ray_dir,  0.0)).xyz;
+  vec3 inv_dir    = 1.0 / (local_dir + vec3(1e-6));
+  float m = 1.01;
+  vec3 t0 = (vec3(-m) - local_orig) * inv_dir;
+  vec3 t1 = (vec3( m) - local_orig) * inv_dir;
   vec3 tmin = min(t0, t1);
   vec3 tmax = max(t0, t1);
-
   float t_near = max(max(tmin.x, tmin.y), tmin.z);
-  float t_far = min(min(tmax.x, tmax.y), tmax.z);
-
+  float t_far  = min(min(tmax.x, tmax.y), tmax.z);
   return t_near <= t_far && t_far > 0.0;
+}
+
+bool intersect_aabb(vec3 ro, vec3 rd, vec3 mn, vec3 mx) {
+  vec3 inv_d = 1.0 / (rd + vec3(1e-30));
+  vec3 t0 = (mn - ro) * inv_d;
+  vec3 t1 = (mx - ro) * inv_d;
+  float t_near = max(max(min(t0.x,t1.x), min(t0.y,t1.y)), min(t0.z,t1.z));
+  float t_far  = min(min(max(t0.x,t1.x), max(t0.y,t1.y)), max(t0.z,t1.z));
+  return t_near <= t_far && t_far > 0.0;
+}
+
+bool bounds_hit(vec3 ro, vec3 rd, BoundsData b) {
+  if (b.bounds_type == 0u)
+    return intersect_aabb(ro, rd, b.inv_transform[0].xyz, b.inv_transform[1].xyz);
+  return intersect_oriented(ro, rd, b.inv_transform);
 }
 
 vec2 intersect_unit_sphere(ray r) {
@@ -570,10 +586,10 @@ bool csg_shadow_test(ray r) {
     result.count = 0;
     uint advance = 1u;
 
-    bool obb_skip = u_use_obb == 1 &&
-        (obbs[i].skip == 1u || !intersect_obb(r.origin, r.dir, obbs[i].inv_transform));
+    bool bounds_skip = u_use_bounds == 1 &&
+        (bounds[i].skip == 1u || !bounds_hit(r.origin, r.dir, bounds[i]));
 
-    if (obb_skip) {
+    if (bounds_skip) {
       has_result = true;
       advance = cmd.skip_children;
     } else if (cmd.type == ID_OP_TYPE_PRIMITIVE ||
@@ -622,22 +638,25 @@ bool csg_shadow_test(ray r) {
 }
 
 // CSG traversal — computes the interval list for ray r.
-interval_list csg_traverse(ray r, inout uint s_obb, inout uint s_hits, inout uint s_misses) {
+interval_list csg_traverse(ray r, inout uint s_bounds, inout uint s_hits, inout uint s_misses,
+                            inout uint s_nodes, inout uint s_leaves) {
   interval_list res_stack[MAX_STACK];
   int res_sp = 0;
 
   uint op_stack[MAX_STACK]; // packed: bits 31-4=dup_id, 3-2=type, 1-0=received
   int op_sp = 0;
 
-  // Clear this thread's cache column in shared memory
   uint tid = gl_LocalInvocationIndex;
-  for (int c = 0; c < CACHE_SIZE; c++) wg_span_cache[c][tid].key = 0u;
+  if (u_use_cache == 1) {
+    for (int c = 0; c < CACHE_SIZE; c++) wg_span_cache[c][tid].key = 0u;
+  }
 
   uint num_ops = uint(commands.length());
 //simplified traversal of the CSG tree returning a boolean occlusion result .
 // Traversal of the CSG tree, root → leaves
 for ( uint i = 0; i < num_ops; ) {
 CSGCommand cmd = commands[i];
+s_nodes++;
 
 bool has_result = false;
 interval_list result;
@@ -678,15 +697,16 @@ else if ( p . type == PRIMITIVE_TYPE_CYLINDER ) hit = intersect_cylinder(local_r
 result = make_primitive_interval(hit, cmd.id);
 if ( u_use_cache == 1 && cmd . duplicate_id != 0u ) save_to_cache(cmd.duplicate_id, result);
 has_result = true ;
+s_leaves++;
 } else {
 // OBB intersection check
-bool obb_skip = u_use_obb == 1 &&
-    (obbs[i].skip == 1u || !intersect_obb(r.origin, r.dir, obbs[i].inv_transform));
+bool bounds_skip = u_use_bounds == 1 &&
+    (bounds[i].skip == 1u || !bounds_hit(r.origin, r.dir, bounds[i]));
 
-if ( obb_skip ) { // empty result, skip subtree
+if ( bounds_skip ) { // empty result, skip subtree
 has_result = true ;
 advance = cmd . skip_children;
-s_obb += cmd . skip_children;
+s_bounds += cmd . skip_children;
 } else if ( cmd . type == ID_OP_TYPE_PRIMITIVE ) { // ray–primitive intersection
 Primitive p = primitives[cmd.id];
 ray local_ray;
@@ -701,6 +721,7 @@ else if ( p . type == PRIMITIVE_TYPE_CYLINDER ) hit = intersect_cylinder(local_r
 result = make_primitive_interval(hit, cmd.id);
 if ( u_use_cache == 1 && cmd . duplicate_id != 0u ) save_to_cache(cmd.duplicate_id, result);
 has_result = true ;
+s_leaves++;
 } else { // OPERATION NODE
 op_stack[op_sp] = make_op_entry(cmd.duplicate_id, operations[cmd.id].type);
 op_sp ++ ;
@@ -732,7 +753,7 @@ empty . count = 0 ;
 return ( res_sp > 0 ) ? res_stack[0] : empty;
 }
 
-// Shade a single span — compute lit surface color given a precomputed shadow_factor.
+// Shade a single span — both paths use the same primitives[] at binding 1.
 vec4 shade_span(span hit, vec3 ray_origin, vec3 ray_dir, float shadow_factor) {
   vec3 hitPos = ray_origin + ray_dir * hit.t_enter;
   return get_final_color(hitPos, primitives[span_prim_id(hit)], span_invert(hit), shadow_factor);
@@ -777,7 +798,8 @@ vec4 composite(interval_list final_list, ray r, ivec2 pixel_coords) {
       shadow_ray.origin = hitPos + world_n * 1e-3;
       shadow_ray.dir = light0;
 
-      if (csg_shadow_test(shadow_ray)) shadow_factor = 0.0;
+      bool in_shadow = csg_shadow_test(shadow_ray);
+      if (in_shadow) shadow_factor = 0.0;
     }
 
     vec4 span_color = shade_span(hit, r.origin, r.dir, shadow_factor);
@@ -794,9 +816,11 @@ vec4 composite(interval_list final_list, ray r, ivec2 pixel_coords) {
   return vec4(u_background, 1.0);
 }
 
-shared uint wg_obb_skipped;
+shared uint wg_bounds_skipped;
 shared uint wg_cache_hits;
 shared uint wg_cache_misses;
+shared uint wg_nodes_visited;
+shared uint wg_leaves_visited;
 
 float hash(vec2 p) {
   return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x))));
@@ -805,18 +829,22 @@ float hash(vec2 p) {
 void main() {
   // Zero workgroup-local stat accumulators
   if (gl_LocalInvocationIndex == 0u) {
-    wg_obb_skipped = 0u;
+    wg_bounds_skipped = 0u;
     wg_cache_hits = 0u;
     wg_cache_misses = 0u;
+    wg_nodes_visited = 0u;
+    wg_leaves_visited = 0u;
   }
   barrier();
 
   ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
   ivec2 dims = imageSize(imgOutput);
 
-  uint inv_obb = 0u;
+  uint inv_bounds = 0u;
   uint inv_hits = 0u;
   uint inv_misses = 0u;
+  uint inv_nodes = 0u;
+  uint inv_leaves = 0u;
 
   if (pixel_coords.x < dims.x && pixel_coords.y < dims.y) {
     vec4 average_color = vec4(0.0);
@@ -837,15 +865,15 @@ void main() {
       r.origin = u_camera_pos;
       r.dir = rayDirWorld;
 
-      interval_list spans = csg_traverse(r, inv_obb, inv_hits, inv_misses);
+      interval_list spans = csg_traverse(r, inv_bounds, inv_hits, inv_misses, inv_nodes, inv_leaves);
       vec4 sample_color = composite(spans, r, pixel_coords);
 
       // Render OBB outlines for debug
       if (u_rendering_mode == 1) {
         float wire = 0.0;
         for (uint i = 0; i < commands.length(); i++) {
-          vec3 local_ro = (obbs[i].inv_transform * vec4(r.origin, 1.0)).xyz;
-          vec3 local_rd = (obbs[i].inv_transform * vec4(r.dir, 0.0)).xyz;
+          vec3 local_ro = (bounds[i].inv_transform * vec4(r.origin, 1.0)).xyz;
+          vec3 local_rd = (bounds[i].inv_transform * vec4(r.dir, 0.0)).xyz;
           wire += wireframe_box(local_ro, local_rd, vec3(-1.0), vec3(1.0));
         }
         if (wire > 0.0) sample_color = mix(sample_color, vec4(1.0, 0.0, 0.2, 1.0), 0.6);
@@ -855,13 +883,17 @@ void main() {
     imageStore(imgOutput, pixel_coords, average_color / float(samples));
   }
 
-  atomicAdd(wg_obb_skipped, inv_obb);
+  atomicAdd(wg_bounds_skipped, inv_bounds);
   atomicAdd(wg_cache_hits, inv_hits);
   atomicAdd(wg_cache_misses, inv_misses);
+  atomicAdd(wg_nodes_visited, inv_nodes);
+  atomicAdd(wg_leaves_visited, inv_leaves);
   barrier();
   if (gl_LocalInvocationIndex == 0u) {
-    atomicAdd(obb_skipped, wg_obb_skipped);
+    atomicAdd(bounds_skipped, wg_bounds_skipped);
     atomicAdd(cache_hits, wg_cache_hits);
     atomicAdd(cache_misses, wg_cache_misses);
+    atomicAdd(nodes_visited, wg_nodes_visited);
+    atomicAdd(leaves_visited, wg_leaves_visited);
   }
 }
