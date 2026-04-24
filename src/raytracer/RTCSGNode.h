@@ -382,14 +382,14 @@ public:
   }
 
   // Flatten the entire tree into DNF (sum-of-products) with a KD BVH over the products.
-  // Assumes distributeOperation() has NOT been called for the DNF path.
-  void flatten_to_dnf(const std::shared_ptr<RTCSGNode>& node, std::vector<Primitive>& primitives,
-                      std::vector<Operation>& operations, std::vector<ProductCommand>& product_commands,
-                      std::vector<ProductBVHNode>& bvh_nodes)
+  uint32_t flatten_to_dnf(const std::shared_ptr<RTCSGNode>& node, std::vector<Primitive>& primitives,
+                          std::vector<Operation>& operations,
+                          std::vector<ProductCommand>& product_commands,
+                          std::vector<ProductBVHNode>& bvh_nodes)
   {
     std::vector<std::shared_ptr<RTCSGNode>> products;
     collect_products(node, products);
-    if (products.empty()) return;
+    if (products.empty()) return 4u;
 
     std::map<RTCSGNode *, uint32_t> prim_cache;
 
@@ -408,8 +408,13 @@ public:
       flat.push_back(std::move(fp));
     }
 
+    uint32_t max_stack = 4u;
+    for (const auto& fp : flat) max_stack = std::max(max_stack, fp.cmd_count);
+
     // Step 2: build KD BVH over flat products
     buildProductBVH(flat, 0, (int)flat.size(), bvh_nodes);
+
+    return max_stack;
   }
 };
 #endif  // !CSG_TREE_H

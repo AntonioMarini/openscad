@@ -61,7 +61,8 @@ protected:
 
 private:
   void rebuildGPUData();
-  GLuint compileComputeShader(const std::string& source, int maxStack);
+  GLuint compileComputeShader(const std::string& source, int maxStack,
+                              const std::string& define_name = "MAX_STACK");
   GLuint compileQuadShader(const std::string& vertSrc, const std::string& fragSrc);
 
   QElapsedTimer fpsTimer;
@@ -139,6 +140,7 @@ private:
   std::string computeShaderSrc;
   std::string dnfComputeShaderSrc;
   int currentMaxStack = 0;
+  int currentDNFMaxStack = 0;
 
   // Camera (simple for now)
   Eigen::Vector3f camPos{0.0f, 0.0f, 3.0f};

@@ -69,7 +69,8 @@ void RTGLView::initializeGL()
   computeProgram = compileComputeShader(computeShaderSrc, currentMaxStack);
 
   dnfComputeShaderSrc = ShaderUtils::loadShaderSource("raytracer/raytracer_span_dnf.glsl");
-  dnfComputeProgram = compileComputeShader(dnfComputeShaderSrc, 0); // MAX_STACK unused in DNF
+  currentDNFMaxStack = 4;
+  dnfComputeProgram = compileComputeShader(dnfComputeShaderSrc, currentDNFMaxStack, "MAX_PRODUCT_STACK");
 
   // Quad shader — use OpenSCAD's utility
   std::string vertSrc = ShaderUtils::loadShaderSource("raytracer/base.vert");
@@ -444,7 +445,8 @@ void RTGLView::rebuildGPUData()
     // DNF path: flatten into product BVH + product commands
     std::vector<ProductCommand> gpuProductCmds;
     std::vector<ProductBVHNode> gpuBVHNodes;
-    tree.flatten_to_dnf(rtRoot, gpuPrimitives, gpuOperations, gpuProductCmds, gpuBVHNodes);
+    uint32_t maxProductStack =
+      tree.flatten_to_dnf(rtRoot, gpuPrimitives, gpuOperations, gpuProductCmds, gpuBVHNodes);
 
     // Leaf count = (bvh_nodes.size() + 1) / 2 for a full binary tree
     uint32_t leaf_count = 0;
@@ -454,6 +456,16 @@ void RTGLView::rebuildGPUData()
               << " cmds=" << gpuProductCmds.size()
               << " prims=" << gpuPrimitives.size()
               << " ops=" << gpuOperations.size() << std::endl;
+
+    int neededDNFStack = static_cast<int>(maxProductStack);
+    if (neededDNFStack != currentDNFMaxStack) {
+      currentDNFMaxStack = neededDNFStack;
+      if (dnfComputeProgram) glDeleteProgram(dnfComputeProgram);
+      dnfComputeProgram = compileComputeShader(dnfComputeShaderSrc, currentDNFMaxStack,
+                                               "MAX_PRODUCT_STACK");
+      std::cout << "[RT/DNF] Recompiled shader with MAX_PRODUCT_STACK=" << currentDNFMaxStack
+                << std::endl;
+    }
 
     createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
     createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
@@ -483,13 +495,14 @@ void RTGLView::rebuildGPUData()
 
 // ---- Shader compilation helpers ----
 
-GLuint RTGLView::compileComputeShader(const std::string& source, int maxStack)
+GLuint RTGLView::compileComputeShader(const std::string& source, int maxStack,
+                                      const std::string& define_name)
 {
-  // Inject #define MAX_STACK after the #version line so it overrides the shader default.
+  // Inject #define after the #version line so it overrides the shader default.
   std::string patched = source;
   auto nl = patched.find('\n');
   if (nl != std::string::npos) {
-    patched.insert(nl + 1, "#define MAX_STACK " + std::to_string(maxStack) + "\n");
+    patched.insert(nl + 1, "#define " + define_name + " " + std::to_string(maxStack) + "\n");
   }
 
   const char *src = patched.c_str();

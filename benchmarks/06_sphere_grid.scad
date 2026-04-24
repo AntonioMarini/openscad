@@ -1,7 +1,6 @@
-// 8x8x8 gradient sphere grid
-$fn = 10;
+$fn = 20;
 
-N       = 8;
+N       = 10;
 spacing = 6;
 r       = 1.2;
 
@@ -17,4 +16,4 @@ for (xi = [0:N-1])
           sphere(r);
             //translate([0.0,0.0,0-r])
             //cylinder(r*2, r/2,r/2);
-          //}
+          //}23

@@ -19,10 +19,6 @@ uniform int u_samples;
 uniform int u_rendering_mode;
 uniform int u_use_cache; // unused in DNF path — here for driver compatibility
 
-// Stack depth inside eval_product. Products are union-free subtrees,
-// so their depth is bounded by log2(N_prims_in_product) << 16.
-#define MAX_PRODUCT_STACK 16
-
 #define MAX_SPANS        3
 #define MAX_SHADOW_SPANS 2
 #define SHADOW_T_MIN     0.01
@@ -61,7 +57,6 @@ struct Operation {
   int _pad;
 };
 
-// 96 bytes: 8x uint (32 B) + mat4 (64 B) — matches ProductBVHNode C++ struct
 struct ProductBVHNode {
   uint is_leaf; // 0 = internal union node, 1 = leaf product
   uint skip_children; // preorder skip count (includes self)
@@ -74,7 +69,6 @@ struct ProductBVHNode {
   mat4 bounds_inv;
 };
 
-// 96 bytes: 8x uint (32 B) + mat4 (64 B)
 struct ProductCommand {
   uint type; // 0 = PRIMITIVE, 1 = OPERATION
   uint id; // index into primitives[] or operations[]
@@ -207,18 +201,23 @@ bool intersect_aabb(vec3 ro, vec3 rd, vec3 mn, vec3 mx) {
 
 // Returns true if hit; sets t_near to the entry distance (or leaves it undefined on miss).
 bool bounds_hit_tnear(vec3 ro, vec3 rd, uint btype, mat4 data, out float t_near) {
-  if (btype == 0u) {
+  if (btype == 0u) { // AABB
     vec3 inv_d = 1.0 / (rd + vec3(1e-30));
+    // the first two columns are min and max bounds
     vec3 t0 = (data[0].xyz - ro) * inv_d;
     vec3 t1 = (data[1].xyz - ro) * inv_d;
+
+    // slab method
     t_near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
     float t_far = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
     return t_near <= t_far && t_far > 0.0;
   } else {
+    // OBB -> needs two vec * mat multiplications for tessting a unit box
     vec3 lo = (data * vec4(ro, 1.0)).xyz;
     vec3 ld = (data * vec4(rd, 0.0)).xyz;
+
     vec3 inv_d = 1.0 / (ld + vec3(1e-6));
-    float m = 1.01;
+    float m = 1.01; // margin
     vec3 t0 = (vec3(-m) - lo) * inv_d;
     vec3 t1 = (vec3(m) - lo) * inv_d;
     t_near = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
@@ -481,11 +480,7 @@ shadow_il merge_shadow_spans(shadow_il la, shadow_il lb, uint op) {
 // ---- DNF product evaluator ----
 //
 // Traverses a single union-free product subtree in preorder.
-// Smart OBB skip: when a node OBB misses, decide whether to early-exit:
-//   can_early_exit = root || INTERSECTION child || DIFFERENCE left child
-//   → product is provably empty; return immediately.
-// Otherwise (DIFFERENCE right child): subtraction is empty, skip subtree, continue.
-
+// The product is a slice of the flatten product commands ssbo
 interval_list eval_product(ray r, uint cmd_start, uint cmd_count,
   inout uint s_bounds, inout uint s_nodes, inout uint s_leaves)
 {

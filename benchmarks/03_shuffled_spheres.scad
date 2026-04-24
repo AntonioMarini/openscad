@@ -1,6 +1,6 @@
 // kd_shuffled_clusters.scad
 
-N       = 5;    // spheres per side per cluster
+N       = 10;    // spheres per side per cluster
 r       = 2;
 spacing = 6;    
 
