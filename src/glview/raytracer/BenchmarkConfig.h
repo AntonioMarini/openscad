@@ -14,6 +14,8 @@ struct BenchmarkConfig {
   int rtUseDistribution = 1;
   int rtBinarization = 1;  // 0 = naive, 1 = KD
   int rtUseDNF = 1;        // 1 = use DNF (Goldfeather) shader path
+  int rtUseTBest = 1;      // 1 = enable t_best occlusion culling in BVH traversal
+  int rtProductBVH = 1;    // 0 = naive (midpoint), 1 = KD (spatial sort)
 
   // Viewport size (0 = keep current)
   int bench_width = 0;

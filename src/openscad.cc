@@ -943,6 +943,8 @@ int openscad_main(int argc, char **argv)
     "rt-samples", po::value<int>()->default_value(1), "Samples per pixel")(
     "rt-distribution", po::value<int>()->default_value(1), "Enable CSG distribution optimisation (0/1)")(
     "rt-binarization", po::value<int>()->default_value(1), "Binarization: 0=naive, 1=KD")(
+    "rt-tbest", po::value<int>()->default_value(1), "Enable t_best occlusion culling (0/1)")(
+    "rt-product-bvh", po::value<int>()->default_value(1), "ProductBVH: 0=naive, 1=KD")(
     "rt-dnf", po::value<int>()->default_value(1), "Use DNF (Goldfeather) shader path (0/1)")(
     "bench-width",  po::value<int>()->default_value(0), "Force viewport width in pixels (0 = keep current)")(
     "bench-height", po::value<int>()->default_value(0), "Force viewport height in pixels (0 = keep current)")(
@@ -1221,6 +1223,8 @@ int openscad_main(int argc, char **argv)
       benchCfg.rtSamples = vm["rt-samples"].as<int>();
       benchCfg.rtUseDistribution = vm["rt-distribution"].as<int>();
       benchCfg.rtBinarization = vm["rt-binarization"].as<int>();
+      benchCfg.rtUseTBest = vm["rt-tbest"].as<int>();
+      benchCfg.rtProductBVH = vm["rt-product-bvh"].as<int>();
       benchCfg.rtUseDNF = vm["rt-dnf"].as<int>();
       benchCfg.bench_width     = vm["bench-width"].as<int>();
       benchCfg.bench_height    = vm["bench-height"].as<int>();

@@ -29,6 +29,7 @@ struct alignas(16) ProductCommand {
   uint32_t skip_children;  // preorder skip count for this subtree
   uint32_t bounds_skip;    // 1 = degenerate, skip test entirely
   uint32_t bounds_type;    // 0 = AABB, 1 = OBB
-  uint32_t _pad[3];
+  uint32_t duplicate_id;   // 0 = unique, >0 = shared subtree (cache key)
+  uint32_t _pad[2];
   Eigen::Matrix4f bounds_inv; // col(0).xyz=min, col(1).xyz=max when bounds_type==0
 };

@@ -814,7 +814,6 @@ MainWindow::MainWindow(const QStringList& filenames) : rubberBandManager(this)
 
   // fills the content of the Recents Files menu.
   updateRecentFileActions();
-
 }
 
 void MainWindow::setAllMouseViewActions()
@@ -1482,25 +1481,25 @@ void MainWindow::compileCSG()
     rtVisitor.setBinarizationMethod(benchmarkConfig.rtBinarization);
 
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());
-    int rtPreDistNodeCount = countRTCSGNodes(rtRoot);
+    int rtPreDistNodeCount = rtVisitor.nodeCount;
     std::cout << "[RT] Nodes before distribution: " << rtPreDistNodeCount << std::endl;
 
     // In benchmark mode: rtUseDistribution controls distribution, regardless of DNF path.
     // In normal interactive mode: distribute only when not using DNF (current behavior).
-    bool shouldDistribute = benchmarkConfig.active
-      ? (benchmarkConfig.rtUseDistribution != 0)
-      : !benchmarkConfig.rtUseDNF;
+    bool shouldDistribute =
+      benchmarkConfig.active ? (benchmarkConfig.rtUseDistribution != 0) : true;
     if (shouldDistribute) {
       this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
     }
-    std::cout << "[RT] Nodes after distribution: " << countRTCSGNodes(rtRoot) << std::endl;
+    rtVisitor.recomputeStats(this->rtRoot);
+    std::cout << "[RT] Nodes after distribution: " << rtVisitor.nodeCount << std::endl;
 
-    int rtNodeCount = countRTCSGNodes(rtRoot);
-    int rtDepth = treeDepth(rtRoot);
+    this->rtNodeCount = rtVisitor.nodeCount;
+    this->rtTreeDepth = rtVisitor.treeDepth;
 
     if (this->rtglview) {
       this->rtglview->setRTTree(this->rtRoot);
-      this->rtglview->setTreeStats(rtNodeCount, rtDepth, rtPreDistNodeCount);
+      this->rtglview->setTreeStats(this->rtNodeCount, this->rtTreeDepth, rtPreDistNodeCount);
     }
 
     if (benchmarkConfig.active) {
@@ -3161,9 +3160,8 @@ void MainWindow::viewModeRaytracer()
     // Swap: hide OpenCSG view, show RT view in same position
     this->rtglview->setGeometry(this->qglview->geometry());
     this->rtglview->makeCurrent();
-    this->rtglview->setUseDNF(benchmarkConfig.rtUseDNF != 0);
     this->rtglview->setRTTree(this->rtRoot);
-    this->rtglview->setTreeStats(countRTCSGNodes(this->rtRoot), treeDepth(this->rtRoot));
+    this->rtglview->setTreeStats(this->rtNodeCount, this->rtTreeDepth);
     this->qglview->hide();
     this->rtglview->show();
     this->rtglview->setFocus();

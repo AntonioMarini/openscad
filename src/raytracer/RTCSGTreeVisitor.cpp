@@ -44,8 +44,7 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeNaive(
 
 // Returns {sum_of_leaf_positions, leaf_count} so the caller can compute
 // the true mean (= sum / count) weighted equally per leaf.
-static std::pair<Eigen::Vector3f, int>
-getCentroidWeighted(const std::shared_ptr<RTCSGNode>& node)
+static std::pair<Eigen::Vector3f, int> getCentroidWeighted(const std::shared_ptr<RTCSGNode>& node)
 {
   if (!node) return {Eigen::Vector3f::Zero(), 0};
   if (node->is_leaf()) return {node->transform.col(3).head<3>(), 1};
@@ -91,10 +90,21 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
 
 // ---- Entry point ----
 
+static std::pair<int, int> computeTreeStats(const std::shared_ptr<RTCSGNode>& node)
+{
+  if (!node) return {0, 0};
+  auto [lCount, lDepth] = computeTreeStats(node->left);
+  auto [rCount, rDepth] = computeTreeStats(node->right);
+  return {1 + lCount + rCount, 1 + std::max(lDepth, rDepth)};
+}
+
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::buildRTTree(const AbstractNode& node)
 {
   this->traverse(node);
   rootNode = stored_term[node.index()];
+  auto [count, depth] = computeTreeStats(rootNode);
+  nodeCount = count;
+  treeDepth = depth;
   return rootNode;
 }
 
@@ -207,15 +217,18 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node)
     Eigen::Matrix4f worldMat = state.matrix().matrix().cast<float>();
 
     Eigen::Vector4f col(defaultColor.x(), defaultColor.y(), defaultColor.z(), 1.0f);
+    bool isDefaultColor = true;
     if (state.color().isValid()) {
       auto stateColor = state.color();
       col = Eigen::Vector4f(static_cast<float>(stateColor.r()), static_cast<float>(stateColor.g()),
                             static_cast<float>(stateColor.b()), static_cast<float>(stateColor.a()));
+      isDefaultColor = false;
     }
 
     if (auto *cube = dynamic_cast<const CubeNode *>(&node)) {
       rtNode = std::make_shared<RTCSGNode>(PrimitiveType::CUBE);
       rtNode->color = col;
+      rtNode->isDefaultColor = isDefaultColor;
 
       Eigen::Vector3f size(cube->x, cube->y, cube->z);
       Eigen::Matrix4f local = Eigen::Matrix4f::Identity();
@@ -229,6 +242,7 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node)
     } else if (auto *sphere = dynamic_cast<const SphereNode *>(&node)) {
       rtNode = std::make_shared<RTCSGNode>(PrimitiveType::SPHERE);
       rtNode->color = col;
+      rtNode->isDefaultColor = isDefaultColor;
 
       float r = static_cast<float>(sphere->r);
       Eigen::Matrix4f local = Eigen::Matrix4f::Identity();
@@ -244,6 +258,7 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node)
       if (rmax > 0.0f) {
         rtNode = std::make_shared<RTCSGNode>(PrimitiveType::CYLINDER);
         rtNode->color = col;
+        rtNode->isDefaultColor = isDefaultColor;
         rtNode->r1 = cyl_r1 / rmax;
         rtNode->r2 = cyl_r2 / rmax;
 
@@ -269,6 +284,13 @@ Response RTCSGTreeVisitor::visit(State& state, const LeafNode& node)
   return Response::ContinueTraversal;
 }
 
+void RTCSGTreeVisitor::recomputeStats(const std::shared_ptr<RTCSGNode>& root)
+{
+  auto [count, depth] = computeTreeStats(root);
+  nodeCount = count;
+  treeDepth = depth;
+}
+
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr<RTCSGNode> node)
 {
   if (node == nullptr) {
@@ -283,14 +305,13 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr
   node->left = distributeOperation(node->left);
   node->right = distributeOperation(node->right);
 
+  // Goldfeather DNF distribution rules — push all unions to the top of the tree.
   // 1) (A U B) int. C -> (A int. C) U (B int. C)
   // 2) A int (B U C) -> (A int. B) U (A int. C)
   // 3) (A U B) \ C -> (A \ C) U (B \ C)
   // 4) A \ (B int. C) -> (A \ B) U (A \ C)
   // 5) A \ (B \ C) -> (A \ B) U (A int. C)
-  // NOTE: A \ (B U C) is intentionally NOT transformed. The equivalent rewrite
-  // (A\B)\C would destroy any balanced union structure on the right, turning a
-  // shallow balanced tree into a deep chain and eliminating OBB culling benefits.
+  // 6) A \ (B U C) -> (A \ B) \ C
 
   bool changed = true;
   while (changed) {
@@ -348,6 +369,15 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr
       node->op = OperationType::UNION;
       node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, B);
       node->right = std::make_shared<RTCSGNode>(OperationType::INTERSECTION, A, C);
+      changed = true;
+    } else if (node->op == OperationType::DIFFERENCE && node->right->op == OperationType::UNION) {  // 6)
+      std::shared_ptr<RTCSGNode> A = node->left;
+      std::shared_ptr<RTCSGNode> B = node->right->left;
+      std::shared_ptr<RTCSGNode> C = node->right->right;
+
+      node->op = OperationType::DIFFERENCE;
+      node->left = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, A, B);
+      node->right = C;
       changed = true;
     }
 

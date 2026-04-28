@@ -2,13 +2,10 @@
 import argparse, csv, json, os, re, shutil, subprocess, sys, pathlib, datetime
 
 FIXED_CONFIGS = [
-    {"label": "Naive, no OBB",       "binarization": 0, "obb": 0, "cache": 0, "distribution": 0, "shadows": 1},
-    {"label": "Naive, OBB",          "binarization": 0, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1},
-    {"label": "KD, OBB",             "binarization": 1, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1},
-   #{"label": "KD, OBB, Dist+Cache", "binarization": 1, "obb": 1, "cache": 1, "distribution": 1, "shadows": 1},
-    {"label": "KD, OBB, dist",       "binarization": 1, "obb": 1, "cache": 0, "distribution": 1, "shadows": 1},
-    {"label": "DNF, no dist",        "binarization": 1, "obb": 1, "cache": 0, "distribution": 0, "shadows": 1, "dnf": 1},
-    {"label": "DNF, dist",           "binarization": 1, "obb": 1, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
+   #{"label": "Baseline",            "binarization": 0, "obb": 0, "tbest": 0, "product_bvh": 0, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
+    {"label": "Bounding Box Culling", "binarization": 0, "obb": 1, "tbest": 0, "product_bvh": 0, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
+    {"label": "t culling",           "binarization": 0, "obb": 1, "tbest": 1, "product_bvh": 0, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
+    {"label": "KD tree",             "binarization": 1, "obb": 1, "tbest": 1, "product_bvh": 1, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
 ]
 
 BENCH_RE = re.compile(
@@ -65,6 +62,8 @@ def run_model(model_path, cfg, args, runs_dir, ts, skip_screenshot=False):
         f"--rt-bounds={cfg['obb']}",
         f"--rt-cache={cfg['cache']}",
         f"--rt-shadows={cfg['shadows']}",
+        f"--rt-tbest={cfg['tbest']}",
+        f"--rt-product-bvh={cfg['product_bvh']}",
         f"--rt-distribution={cfg['distribution']}",
         f"--rt-dnf={cfg.get('dnf', 0)}",
         f"--bench-width={args.width}",
@@ -300,8 +299,8 @@ def main():
                    help="Frames to render but discard before recording (default: 2)")
     p.add_argument("--width",     type=int,   default=1920, help="Viewport width in pixels")
     p.add_argument("--height",    type=int,   default=1080, help="Viewport height in pixels")
-    p.add_argument("--output",    default="benchmark_results",
-                   help="Top-level output folder")
+    p.add_argument("--output",    default=None,
+                   help="Top-level output folder (default: bench_<timestamp>)")
     p.add_argument("--openscad",  default="./build/openscad")
     args = p.parse_args()
 
@@ -318,6 +317,8 @@ def main():
     print(f"Output: {args.output}/")
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    if args.output is None:
+        args.output = f"bench_{ts}"
     failed = []
     all_model_results = []
 
@@ -326,9 +327,8 @@ def main():
         # Clean output folder for this model (the Overleaf-ready one)
         model_dir = pathlib.Path(args.output) / stem
         model_dir.mkdir(parents=True, exist_ok=True)
-        # Raw per-config run outputs go here (not needed by Overleaf)
-        runs_dir = model_dir / "_runs"
-        runs_dir.mkdir(parents=True, exist_ok=True)
+        # Per-config run outputs go directly under model_dir
+        runs_dir = model_dir
 
         results = []
         screenshot_dst = None

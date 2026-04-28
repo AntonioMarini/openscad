@@ -219,6 +219,8 @@ private:
 
   RTGLView *rtglview = nullptr;
   std::shared_ptr<RTCSGNode> rtRoot;
+  int rtNodeCount = 0;
+  int rtTreeDepth = 0;
   bool rtViewActive = false;
   void viewModeRaytracer();
 

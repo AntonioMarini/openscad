@@ -8,7 +8,7 @@
 RTBounds RTBounds::makeAABB(const Eigen::Vector3f& mn, const Eigen::Vector3f& mx)
 {
   RTBounds bb;
-  bb.skip        = 0;
+  bb.skip = 0;
   bb.bounds_type = 0;
   bb.inv_transform = Eigen::Matrix4f::Zero();
   bb.inv_transform.col(0) = Eigen::Vector4f(mn.x(), mn.y(), mn.z(), 0.0f);
@@ -37,7 +37,7 @@ bool RTBounds::containsPoint(const Eigen::Vector3f& point) const
     return (point.array() >= mn.array()).all() && (point.array() <= mx.array()).all();
   }
   Eigen::Vector4f local = inv_transform * Eigen::Vector4f(point.x(), point.y(), point.z(), 1.0f);
-  return std::abs(local.x()) <= 1.0f && std::abs(local.y()) <= 1.0f && std::abs(local.z()) <= 1.0f;
+  return std::abs(local.x()) <= 1.01f && std::abs(local.y()) <= 1.01f && std::abs(local.z()) <= 1.01f;
 }
 
 std::vector<Eigen::Vector3f> RTBounds::getCorners() const
@@ -155,7 +155,7 @@ RTBounds RTBounds::buildPrimitiveBounds(const RTCSGNode& node)
   // ---- Select tighter bound ----
   if (bounds_volume <= TIGHT_BOUNDS_THRESHOLD * aabb_volume) {
     RTBounds bb;
-    bb.skip        = 0;
+    bb.skip = 0;
     bb.bounds_type = 1;
     bb.inv_transform = boundsMat.inverse();
     return bb;
@@ -187,7 +187,7 @@ RTBounds RTBounds::buildPrimitiveAABB(const RTCSGNode& node)
 RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& leftBounds,
                                         const RTBounds& rightBounds)
 {
-  auto leftCorners  = leftBounds.getCorners();
+  auto leftCorners = leftBounds.getCorners();
   auto rightCorners = rightBounds.getCorners();
   RTBounds result;
   result.skip = 0;
@@ -223,7 +223,7 @@ RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& le
       if (leftBounds.containsPoint(c)) selectedCorners.push_back(c);
     }
 
-    auto leftTris  = triangulateBoundsCorners(leftCorners);
+    auto leftTris = triangulateBoundsCorners(leftCorners);
     auto rightTris = triangulateBoundsCorners(rightCorners);
 
     for (auto& tA : leftTris) {
@@ -311,7 +311,7 @@ RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& le
     aabb_min = aabb_min.cwiseMin(c);
     aabb_max = aabb_max.cwiseMax(c);
   }
-  Eigen::Vector3f aabb_he   = (aabb_max - aabb_min) * 0.5f;
+  Eigen::Vector3f aabb_he = (aabb_max - aabb_min) * 0.5f;
   Eigen::Vector3f aabb_center = (aabb_max + aabb_min) * 0.5f;
   float aabb_volume = 8.0f * aabb_he.x() * aabb_he.y() * aabb_he.z();
 
@@ -321,9 +321,9 @@ RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& le
   aabbMat.col(2).head<3>() = Eigen::Vector3f(0, 0, aabb_he.z());
   aabbMat.col(3).head<3>() = aabb_center;
 
-  // Use OBB only when significantly tighter than AABB
-  if (bounds_volume <= TIGHT_BOUNDS_THRESHOLD * aabb_volume) {
-    result.bounds_type   = 1;
+  // Use OBB only when tighter than AABB
+  if (bounds_volume <= aabb_volume) {
+    result.bounds_type = 1;
     result.inv_transform = boundsMat.inverse();
   } else {
     result = makeAABB(aabb_min, aabb_max);

@@ -34,6 +34,9 @@ public:
   // Entry point — same pattern as CSGTreeEvaluator::buildCSGTree
   std::shared_ptr<RTCSGNode> buildRTTree(const AbstractNode& node);
 
+  // Recompute nodeCount and treeDepth from the given tree root
+  void recomputeStats(const std::shared_ptr<RTCSGNode>& root);
+
   // Method used for distributing operations other than unions. Leaving all the unions on top of the
   // tree.
   std::shared_ptr<RTCSGNode> distributeOperation(std::shared_ptr<RTCSGNode> node);
@@ -45,6 +48,9 @@ public:
 
   Eigen::Vector3f defaultColor = Eigen::Vector3f(1.0f, 1.0f, 1.0f);
   void setDefaultColor(const Eigen::Vector3f& col) { defaultColor = col; }
+
+  int nodeCount = 0;
+  int treeDepth = 0;
 
   bool useKDBinarization = true;
   void setBinarizationMethod(int m) { useKDBinarization = (m != 0); }

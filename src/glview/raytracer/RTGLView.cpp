@@ -2,6 +2,9 @@
 #include "RTGLView.h"
 
 #include "glview/hershey.h"
+#include "raytracer/CSGCommand.h"
+#include "raytracer/CSGTree.h"
+#include "glview/system-gl.h"
 
 #include <QApplication>
 #include <QKeyEvent>
@@ -36,8 +39,6 @@ RTGLView::~RTGLView()
   makeCurrent();
   if (primitivesSSBO) glDeleteBuffers(1, &primitivesSSBO);
   if (operationsSSBO) glDeleteBuffers(1, &operationsSSBO);
-  if (commandsSSBO) glDeleteBuffers(1, &commandsSSBO);
-  if (boundsSSBO) glDeleteBuffers(1, &boundsSSBO);
   if (productBVHSSBO) glDeleteBuffers(1, &productBVHSSBO);
   if (productCommandsSSBO) glDeleteBuffers(1, &productCommandsSSBO);
   if (statsSSBO) glDeleteBuffers(1, &statsSSBO);
@@ -45,7 +46,6 @@ RTGLView::~RTGLView()
   if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
   if (quadVBO) glDeleteBuffers(1, &quadVBO);
   if (computeProgram) glDeleteProgram(computeProgram);
-  if (dnfComputeProgram) glDeleteProgram(dnfComputeProgram);
   if (quadProgram) glDeleteProgram(quadProgram);
   doneCurrent();
 }
@@ -64,13 +64,10 @@ float RTGLView::getDPI() { return devicePixelRatio(); }
 void RTGLView::initializeGL()
 {
   std::cout << "[RT] OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
-  computeShaderSrc = ShaderUtils::loadShaderSource("raytracer/raytracer_span.glsl");
-  currentMaxStack = 8;
-  computeProgram = compileComputeShader(computeShaderSrc, currentMaxStack);
 
-  dnfComputeShaderSrc = ShaderUtils::loadShaderSource("raytracer/raytracer_span_dnf.glsl");
+  computeShaderSrc = ShaderUtils::loadShaderSource("raytracer/raytracer_span_dnf.glsl");
   currentDNFMaxStack = 4;
-  dnfComputeProgram = compileComputeShader(dnfComputeShaderSrc, currentDNFMaxStack, "MAX_PRODUCT_STACK");
+  computeProgram = compileComputeShader(computeShaderSrc, currentDNFMaxStack, "MAX_PRODUCT_STACK");
 
   // Quad shader — use OpenSCAD's utility
   std::string vertSrc = ShaderUtils::loadShaderSource("raytracer/base.vert");
@@ -200,14 +197,14 @@ void RTGLView::paintGL()
 
   // Reset GPU stats before each measured frame so per-frame values fit in uint32
   if (benchConfig.active && benchStep >= 1 && statsSSBO) {
-    const uint32_t zeros[5] = {0, 0, 0, 0, 0};
+    const uint32_t zeros[3] = {0, 0, 0};
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, statsSSBO);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 5 * sizeof(uint32_t), zeros);
+    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), zeros);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
   }
 
   // ---- Compute shader ----
-  GLuint activeProgram = useDNF ? dnfComputeProgram : computeProgram;
+  GLuint activeProgram = computeProgram;
   glUseProgram(activeProgram);
 
   float aspectRatio = (float)w / (float)h;
@@ -215,22 +212,27 @@ void RTGLView::paintGL()
   glUniform1f(glGetUniformLocation(activeProgram, "aspectRatio"), aspectRatio);
   glUniform3f(glGetUniformLocation(activeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
   glUniform1i(glGetUniformLocation(activeProgram, "u_samples"), 1);
-  glUniform1i(glGetUniformLocation(activeProgram, "u_rendering_mode"), 0);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_rendering_mode"), 1);
   glUniform1i(glGetUniformLocation(activeProgram, "u_use_bounds"), rtUseBounds);
-  glUniform1i(glGetUniformLocation(activeProgram, "u_use_cache"), rtUseCache);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_tbest"), rtUseTBest);
   glUniform1i(glGetUniformLocation(activeProgram, "u_use_shadows"), 0);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_dup_cache"), 1);
 
   if (colorscheme) {
     Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
     Color4f defaultMatColor = ColorMap::getColor(*colorscheme, RenderColor::OPENCSG_FACE_FRONT_COLOR);
+    Color4f backFaceColor = ColorMap::getColor(*colorscheme, RenderColor::OPENCSG_FACE_BACK_COLOR);
 
     glUniform3f(glGetUniformLocation(activeProgram, "u_background"), bg.r(), bg.g(), bg.b());
     glUniform3f(glGetUniformLocation(activeProgram, "u_default_mat_color"), defaultMatColor.r(),
                 defaultMatColor.g(), defaultMatColor.b());
+    glUniform3f(glGetUniformLocation(activeProgram, "u_default_back_color"), backFaceColor.r(),
+                backFaceColor.g(), backFaceColor.b());
   } else {
     glUniform3f(glGetUniformLocation(activeProgram, "u_background"), 0.5f, 0.7f, 1.0f);
     glUniform3f(glGetUniformLocation(activeProgram, "u_default_mat_color"), 1.0f, 1.0f,
                 1.0f);  // White fallback
+    glUniform3f(glGetUniformLocation(activeProgram, "u_default_back_color"), 0.8f, 0.2f, 0.8f);
   }
 
   Eigen::Matrix4f view = getViewMatrix(*openscadCam);
@@ -259,14 +261,8 @@ void RTGLView::paintGL()
 
   // Bind SSBOs
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, primitivesSSBO);
-  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, operationsSSBO);
-  if (useDNF) {
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, productBVHSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, productCommandsSSBO);
-  } else {
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, commandsSSBO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, boundsSSBO);
-  }
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 3, productBVHSSBO);
+  glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, productCommandsSSBO);
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, statsSSBO);
 
   // Bind output textures (color + depth)
@@ -365,15 +361,13 @@ void RTGLView::paintGL()
       // SSBO was reset at the start of this frame, so values represent this frame only.
       if (statsSSBO) {
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
-        uint32_t gpuStats[5] = {0, 0, 0, 0, 0};
+        uint32_t gpuStats[3] = {0, 0, 0};
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
-        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 5 * sizeof(uint32_t), gpuStats);
+        glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), gpuStats);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
         benchBoundsSkippedTotal += gpuStats[0];
-        benchCacheHitsTotal += gpuStats[1];
-        benchCacheMissesTotal += gpuStats[2];
-        benchNodesVisitedTotal += gpuStats[3];
-        benchLeavesVisitedTotal += gpuStats[4];
+        benchNodesVisitedTotal += gpuStats[1];
+        benchLeavesVisitedTotal += gpuStats[2];
       }
     }
     advanceBenchmarkStep();
@@ -399,33 +393,6 @@ void RTGLView::rebuildGPUData()
 
   CSGTree tree(rtRoot);
 
-  if (!useDNF) {
-    tree.node_count.clear();
-    tree.node_duplicate_id.clear();
-    tree.node_first_cmd_id.clear();
-    tree.next_duplicate_id = 1;
-    tree.countNodes(rtRoot);
-    tree.flatten_tree(rtRoot, gpuPrimitives, gpuOperations, gpuCommands, gpuBounds);
-
-    // MAX_STACK must cover the actual tree depth — log2(N) only holds for balanced trees.
-    // difference() with N children creates an N-deep left-linear chain, so we use the
-    // real post-distribution depth when available, falling back to log2(N).
-    int neededStack;
-    if (benchTreeDepth > 0) {
-      neededStack = std::max(4, benchTreeDepth);
-    } else {
-      int n = static_cast<int>(gpuCommands.size());
-      neededStack = std::max(4, static_cast<int>(std::ceil(std::log2(n + 1))));
-    }
-    if (neededStack != currentMaxStack) {
-      currentMaxStack = neededStack;
-      if (computeProgram) glDeleteProgram(computeProgram);
-      computeProgram = compileComputeShader(computeShaderSrc, currentMaxStack);
-      std::cout << "[RT] Recompiled shaders with MAX_STACK=" << currentMaxStack << " (tree_depth="
-                << benchTreeDepth << ") for " << gpuCommands.size() << " commands" << std::endl;
-    }
-  }
-
   // ---- Upload SSBOs ----
   auto createSSBO = [](GLuint& id, size_t size, const void *data, GLuint binding) {
     if (id) glDeleteBuffers(1, &id);
@@ -441,52 +408,40 @@ void RTGLView::rebuildGPUData()
 
   glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
-  if (useDNF) {
-    // DNF path: flatten into product BVH + product commands
-    std::vector<ProductCommand> gpuProductCmds;
-    std::vector<ProductBVHNode> gpuBVHNodes;
-    uint32_t maxProductStack =
-      tree.flatten_to_dnf(rtRoot, gpuPrimitives, gpuOperations, gpuProductCmds, gpuBVHNodes);
+  // DNF path: flatten into product BVH + product commands
+  std::vector<ProductCommand> gpuProductCmds;
+  std::vector<ProductBVHNode> gpuBVHNodes;
+  uint32_t maxProductStack = tree.flatten_to_dnf(rtRoot, gpuPrimitives, gpuOperations, gpuProductCmds,
+                                                 gpuBVHNodes, rtProductBVH != 0);
 
-    // Leaf count = (bvh_nodes.size() + 1) / 2 for a full binary tree
-    uint32_t leaf_count = 0;
-    for (const auto& n : gpuBVHNodes) if (n.is_leaf) leaf_count++;
-    std::cout << "[RT/DNF] products=" << leaf_count
-              << " bvh_nodes=" << gpuBVHNodes.size()
-              << " cmds=" << gpuProductCmds.size()
-              << " prims=" << gpuPrimitives.size()
-              << " ops=" << gpuOperations.size() << std::endl;
+  // Leaf count = (bvh_nodes.size() + 1) / 2 for a full binary tree
+  uint32_t leaf_count = 0;
+  for (const auto& n : gpuBVHNodes)
+    if (n.is_leaf) leaf_count++;
+  std::cout << "[RT/DNF] products=" << leaf_count << " bvh_nodes=" << gpuBVHNodes.size()
+            << " cmds=" << gpuProductCmds.size() << " prims=" << gpuPrimitives.size()
+            << " ops=" << gpuOperations.size() << std::endl;
 
-    int neededDNFStack = static_cast<int>(maxProductStack);
-    if (neededDNFStack != currentDNFMaxStack) {
-      currentDNFMaxStack = neededDNFStack;
-      if (dnfComputeProgram) glDeleteProgram(dnfComputeProgram);
-      dnfComputeProgram = compileComputeShader(dnfComputeShaderSrc, currentDNFMaxStack,
-                                               "MAX_PRODUCT_STACK");
-      std::cout << "[RT/DNF] Recompiled shader with MAX_PRODUCT_STACK=" << currentDNFMaxStack
-                << std::endl;
-    }
-
-    createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
-    createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
-    createSSBO(productBVHSSBO, gpuBVHNodes.size() * sizeof(ProductBVHNode),
-               gpuBVHNodes.data(), 3);
-    createSSBO(productCommandsSSBO, gpuProductCmds.size() * sizeof(ProductCommand),
-               gpuProductCmds.data(), 4);
-  } else {
-    // Span shader path: flat preorder command list + separate OBB array
-    createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
-    createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
-    createSSBO(commandsSSBO, gpuCommands.size() * sizeof(CSGCommand), gpuCommands.data(), 3);
-    createSSBO(boundsSSBO, gpuBounds.size() * sizeof(RTBounds), gpuBounds.data(), 4);
+  int neededDNFStack = static_cast<int>(maxProductStack);
+  if (neededDNFStack != currentDNFMaxStack) {
+    currentDNFMaxStack = neededDNFStack;
+    if (computeProgram) glDeleteProgram(computeProgram);
+    computeProgram = compileComputeShader(computeShaderSrc, currentDNFMaxStack, "MAX_PRODUCT_STACK");
+    std::cout << "[RT/DNF] Recompiled shader with MAX_PRODUCT_STACK=" << currentDNFMaxStack << std::endl;
   }
+
+  createSSBO(primitivesSSBO, gpuPrimitives.size() * sizeof(Primitive), gpuPrimitives.data(), 1);
+  createSSBO(operationsSSBO, gpuOperations.size() * sizeof(Operation), gpuOperations.data(), 2);
+  createSSBO(productBVHSSBO, gpuBVHNodes.size() * sizeof(ProductBVHNode), gpuBVHNodes.data(), 3);
+  createSSBO(productCommandsSSBO, gpuProductCmds.size() * sizeof(ProductCommand), gpuProductCmds.data(),
+             4);
 
   // Stats SSBO (binding 5)
   if (statsSSBO) glDeleteBuffers(1, &statsSSBO);
-  const uint32_t zeroStats[5] = {0, 0, 0, 0, 0};
+  const uint32_t zeroStats[3] = {0, 0, 0};
   glGenBuffers(1, &statsSSBO);
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
-  glBufferData(GL_SHADER_STORAGE_BUFFER, 5 * sizeof(uint32_t), zeroStats, GL_DYNAMIC_READ);
+  glBufferData(GL_SHADER_STORAGE_BUFFER, 3 * sizeof(uint32_t), zeroStats, GL_DYNAMIC_READ);
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, statsSSBO);
   glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
 
@@ -785,7 +740,8 @@ void RTGLView::setBenchmarkConfig(const BenchmarkConfig& cfg)
   rtUseCache = cfg.rtUseCache;
   rtUseShadows = cfg.rtUseShadows;
   rtSamples = cfg.rtSamples;
-  useDNF = cfg.rtUseDNF != 0;
+  rtUseTBest = cfg.rtUseTBest;
+  rtProductBVH = cfg.rtProductBVH;
   needsRebuild = true;
 }
 
@@ -807,8 +763,6 @@ void RTGLView::startBenchmarkOrbit()
   benchFrameMs.clear();
   benchScreenshotTaken = false;
   benchBoundsSkippedTotal = 0;
-  benchCacheHitsTotal = 0;
-  benchCacheMissesTotal = 0;
   benchNodesVisitedTotal = 0;
   benchLeavesVisitedTotal = 0;
 

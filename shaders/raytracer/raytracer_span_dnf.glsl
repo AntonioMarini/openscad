@@ -13,15 +13,19 @@ uniform float aspectRatio;
 uniform vec3 u_light_dir;
 uniform vec3 u_background;
 uniform vec3 u_default_mat_color;
+uniform vec3 u_default_back_color;
 uniform int u_use_bounds;
+uniform int u_use_tbest;
 uniform int u_use_shadows;
+uniform int u_use_dup_cache;
 uniform int u_samples;
 uniform int u_rendering_mode;
-uniform int u_use_cache; // unused in DNF path — here for driver compatibility
 
 #define MAX_SPANS        3
 #define MAX_SHADOW_SPANS 2
 #define SHADOW_T_MIN     0.01
+#define MAX_BVH_STACK    20
+#define MAX_DUP_CACHE    4
 
 // Primitive type constants — must match Primitive.h
 const uint PRIMITIVE_TYPE_SPHERE = 1u;
@@ -45,7 +49,7 @@ struct Primitive {
   int type;
   float r1;
   float r2;
-  int _pad;
+  int defaultColor;
   vec4 color;
   mat4 inv_transform;
 };
@@ -60,7 +64,7 @@ struct Operation {
 struct ProductBVHNode {
   uint is_leaf; // 0 = internal union node, 1 = leaf product
   uint skip_children; // preorder skip count (includes self)
-  uint bounds_skip; // 1 = degenerate, skip entirely
+  uint bounds_skip; // 1 = skip entirely
   uint bounds_type; // 0 = AABB (col(0).xyz=min, col(1).xyz=max), 1 = OBB
   uint cmd_start; // leaf only
   uint cmd_count; // leaf only
@@ -75,7 +79,7 @@ struct ProductCommand {
   uint skip_children; // preorder skip count for this subtree
   uint bounds_skip; // 1 = degenerate, skip test entirely
   uint bounds_type; // 0 = AABB (slab), 1 = OBB (matrix)
-  uint _pad0;
+  uint duplicate_id; // 0 = unique, >0 = shared subtree (cache key)
   uint _pad1;
   uint _pad2;
   mat4 bounds_inv; // OBB inv-transform, OR col(0).xyz=min/col(1).xyz=max for AABB
@@ -98,8 +102,6 @@ layout(std430, binding = 4) readonly buffer ProductCommandsBuf {
 
 layout(std430, binding = 5) buffer StatsBuffer {
   uint bounds_skipped;
-  uint cache_hits; // always 0 in DNF path
-  uint cache_misses; // always 0 in DNF path
   uint nodes_visited;
   uint leaves_visited;
 };
@@ -159,13 +161,19 @@ float shadow_span_exit(shadow_span s) {
 }
 
 // ---- Op-stack helpers (same encoding as span shader) ----
-// bits 31-4: dup_id (unused in DNF, always 0)  bits 3-2: op_type  bits 1-0: received
+// bits 31-4: dup_id  bits 3-2: op_type  bits 1-0: received
 
 uint encode_op_type(uint t) {
   return t == OP_TYPE_OPUNION ? 0u : t == OP_TYPE_OPINTERSECTION ? 1u : 2u;
 }
 uint decode_op_type(uint e) {
   return e == 0u ? OP_TYPE_OPUNION : e == 1u ? OP_TYPE_OPINTERSECTION : OP_TYPE_OPDIFFERENCE;
+}
+uint make_op_entry(uint dup_id, uint op_type) {
+  return ((dup_id & 0x0FFFFFFFu) << 4) | (encode_op_type(op_type) << 2);
+}
+uint get_op_dup_id(uint e) {
+  return e >> 4;
 }
 uint get_op_type(uint e) {
   return decode_op_type((e >> 2) & 3u);
@@ -174,12 +182,43 @@ uint get_op_received(uint e) {
   return e & 3u;
 }
 
+// ---- Duplicate subtree cache (workgroup shared memory) ----
+// Layout: [CACHE_SIZE][WG_SIZE] — each thread owns an independent lane
+// indexed by gl_LocalInvocationIndex, so cached span lists are ray-private.
+#define WG_SIZE 64
+
+shared uint          wg_span_cache_keys[MAX_DUP_CACHE][WG_SIZE];
+shared interval_list wg_span_cache[MAX_DUP_CACHE][WG_SIZE];
+
+void dup_cache_clear() {
+  uint tid = gl_LocalInvocationIndex;
+  for (int i = 0; i < MAX_DUP_CACHE; i++)
+    wg_span_cache_keys[i][tid] = 0u;
+}
+
+bool dup_cache_lookup(uint dup_id, out interval_list result) {
+  uint tid = gl_LocalInvocationIndex;
+  uint slot = (dup_id - 1u) % uint(MAX_DUP_CACHE);
+  if (wg_span_cache_keys[slot][tid] == dup_id) {
+    result = wg_span_cache[slot][tid];
+    return true;
+  }
+  return false;
+}
+
+void dup_cache_store(uint dup_id, interval_list result) {
+  uint tid = gl_LocalInvocationIndex;
+  uint slot = (dup_id - 1u) % uint(MAX_DUP_CACHE);
+  wg_span_cache_keys[slot][tid] = dup_id;
+  wg_span_cache[slot][tid] = result;
+}
+
 // ---- OBB intersection ----
 
 bool intersect_oriented(vec3 ro, vec3 rd, mat4 inv_t) {
   vec3 lo = (inv_t * vec4(ro, 1.0)).xyz;
   vec3 ld = (inv_t * vec4(rd, 0.0)).xyz;
-  vec3 inv_d = 1.0 / (ld + vec3(1e-6));
+  vec3 inv_d = 1.0 / ld;
   float m = 1.01;
   vec3 t0 = (vec3(-m) - lo) * inv_d;
   vec3 t1 = (vec3(m) - lo) * inv_d;
@@ -216,7 +255,7 @@ bool bounds_hit_tnear(vec3 ro, vec3 rd, uint btype, mat4 data, out float t_near)
     vec3 lo = (data * vec4(ro, 1.0)).xyz;
     vec3 ld = (data * vec4(rd, 0.0)).xyz;
 
-    vec3 inv_d = 1.0 / (ld + vec3(1e-6));
+    vec3 inv_d = 1.0 / ld;
     float m = 1.01; // margin
     vec3 t0 = (vec3(-m) - lo) * inv_d;
     vec3 t1 = (vec3(m) - lo) * inv_d;
@@ -247,46 +286,95 @@ vec2 intersect_box_AABB(ray r) {
   return vec2(te, tx);
 }
 
+vec2 cylinder_cap_check(ray r, float te, float tx,
+    float ty_enter, float ty_exit, float r1, float r2) {
+  if (te >= tx) return NO_HIT_SPAN;
+  // Cap radius check: if entry/exit is on a cap, verify inside circle
+  if (te == ty_enter) {
+    vec2 p = r.origin.xz + te * r.dir.xz;
+    float cap_r = (r.origin.y + te * r.dir.y < 0.0) ? r1 : r2;
+    if (dot(p, p) > cap_r * cap_r) return NO_HIT_SPAN;
+  }
+  if (tx == ty_exit) {
+    vec2 p = r.origin.xz + tx * r.dir.xz;
+    float cap_r = (r.origin.y + tx * r.dir.y < 0.0) ? r1 : r2;
+    if (dot(p, p) > cap_r * cap_r) return NO_HIT_SPAN;
+  }
+  return vec2(te, tx);
+}
+
 vec2 intersect_cylinder(ray r, float r1, float r2) {
+  // Cylinder along Y axis, y in [-0.5, 0.5], radius r1 (bottom) to r2 (top)
+
   float slope = r2 - r1;
   float R0 = r1 + slope * (r.origin.y + 0.5);
+
+  // --- Infinite tube intersection (2D circle/cone in XZ) ---
   float a = r.dir.x * r.dir.x + r.dir.z * r.dir.z - slope * slope * r.dir.y * r.dir.y;
   float bh = r.origin.x * r.dir.x + r.origin.z * r.dir.z - R0 * slope * r.dir.y;
   float c = r.origin.x * r.origin.x + r.origin.z * r.origin.z - R0 * R0;
 
-  float te = 1.0 / 0.0, tx = -(1.0 / 0.0);
-  if (abs(a) > 1e-7) {
-    float disc = bh * bh - a * c;
-    if (disc >= 0.0) {
-      float sq = sqrt(disc);
-      float t0 = (-bh - sq) / a, t1 = (-bh + sq) / a;
-      float y0 = r.origin.y + t0 * r.dir.y, y1 = r.origin.y + t1 * r.dir.y;
-      if (y0 >= -0.5 && y0 <= 0.5) {
-        te = min(te, t0);
-        tx = max(tx, t0);
-      }
-      if (y1 >= -0.5 && y1 <= 0.5) {
-        te = min(te, t1);
-        tx = max(tx, t1);
-      }
+  // --- Y-slab clamp: intersect y = -0.5 and y = 0.5 planes ---
+  float ty_enter, ty_exit;
+  if (abs(r.dir.y) > 1e-30) {
+    float iy = 1.0 / r.dir.y;
+    ty_enter = (-0.5 - r.origin.y) * iy;
+    ty_exit = (0.5 - r.origin.y) * iy;
+    if (ty_enter > ty_exit) {
+      float tmp = ty_enter;
+      ty_enter = ty_exit;
+      ty_exit = tmp;
     }
+  } else {
+    // Ray parallel to caps — either fully inside or outside slab
+    if (r.origin.y < -0.5 || r.origin.y > 0.5) return NO_HIT_SPAN;
+    ty_enter = -(1.0 / 0.0);
+    ty_exit = (1.0 / 0.0);
   }
-  if (abs(r.dir.y) > 1e-7) {
-    float tb = (-0.5 - r.origin.y) / r.dir.y;
-    vec2 pb = r.origin.xz + tb * r.dir.xz;
-    if (dot(pb, pb) <= r1 * r1 + 1e-6) {
-      te = min(te, tb);
-      tx = max(tx, tb);
-    }
-    float tt = (0.5 - r.origin.y) / r.dir.y;
-    vec2 pt = r.origin.xz + tt * r.dir.xz;
-    if (dot(pt, pt) <= r2 * r2 + 1e-6) {
-      te = min(te, tt);
-      tx = max(tx, tt);
-    }
+
+  float disc = bh * bh - a * c;
+
+  if (abs(a) <= 1e-30) {
+    // Ray parallel to cone surface — inside only if origin is inside cone
+    if (c >= 0.0) return NO_HIT_SPAN;
+    return cylinder_cap_check(r, ty_enter, ty_exit, ty_enter, ty_exit, r1, r2);
   }
-  if (te >= tx) return NO_HIT_SPAN;
-  return vec2(te, tx);
+
+  if (a > 0.0) {
+    // Standard case: ray inside cone between roots [t0, t1]
+    if (disc < 0.0) return NO_HIT_SPAN;
+    float sq = sqrt(max(disc, 0.0));
+    float t0 = (-bh - sq) / a;
+    float t1 = (-bh + sq) / a;
+
+    float te = max(t0, ty_enter);
+    float tx = min(t1, ty_exit);
+    return cylinder_cap_check(r, te, tx, ty_enter, ty_exit, r1, r2);
+  }
+
+  // a < 0: ray steeper than cone slope.
+  // Inside region is the COMPLEMENT: (-inf, lo) ∪ (hi, inf)
+  if (disc < 0.0) {
+    // No roots — ray is always inside cone, return slab
+    return cylinder_cap_check(r, ty_enter, ty_exit, ty_enter, ty_exit, r1, r2);
+  }
+
+  float sq = sqrt(max(disc, 0.0));
+  float ra = (-bh - sq) / a;
+  float rb = (-bh + sq) / a;
+  float lo = min(ra, rb);
+  float hi = max(ra, rb);
+
+  // First inside interval: (-inf, lo) ∩ slab
+  float te1 = ty_enter;
+  float tx1 = min(lo, ty_exit);
+  vec2 hit1 = cylinder_cap_check(r, te1, tx1, ty_enter, ty_exit, r1, r2);
+  if (hit1 != NO_HIT_SPAN) return hit1;
+
+  // Second inside interval: (hi, inf) ∩ slab
+  float te2 = max(hi, ty_enter);
+  float tx2 = ty_exit;
+  return cylinder_cap_check(r, te2, tx2, ty_enter, ty_exit, r1, r2);
 }
 
 // ---- Normals and shading ----
@@ -317,10 +405,12 @@ vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal, float s
   vec3 l0 = normalize(e2w * normalize(vec3(-1, +1, +1)));
   vec3 l1 = normalize(e2w * normalize(vec3(+1, -1, -1)));
 
+  vec3 mat_color = (invert_normal && prim.defaultColor == 1) ? u_default_back_color : prim.color.rgb;
+
   float diffuse = max(0.0, dot(wn, l0)) * shadow_factor + max(0.0, dot(wn, l1));
   vec3 half_v = normalize(l0 + view);
   float specular = pow(max(0.0, dot(wn, half_v)), 48.0) * 0.25 * shadow_factor;
-  return vec4(clamp(prim.color.rgb * (0.2 + diffuse) + vec3(specular), 0.0, 1.0), prim.color.a);
+  return vec4(clamp(mat_color * (0.2 + diffuse) + vec3(specular), 0.0, 1.0), prim.color.a);
 }
 
 // ---- Interval list helpers ----
@@ -482,12 +572,13 @@ shadow_il merge_shadow_spans(shadow_il la, shadow_il lb, uint op) {
 // Traverses a single union-free product subtree in preorder.
 // The product is a slice of the flatten product commands ssbo
 interval_list eval_product(ray r, uint cmd_start, uint cmd_count,
-  inout uint s_bounds, inout uint s_nodes, inout uint s_leaves)
+  inout uint s_bounds, inout uint s_nodes, inout uint s_leaves,
+  float best_t)
 {
   interval_list res_stack[MAX_PRODUCT_STACK];
   int res_sp = 0;
-  // bits 3-2: encoded op type, bits 1-0: received count
   uint op_stack[MAX_PRODUCT_STACK];
+  uint op_end[MAX_PRODUCT_STACK];
   int op_sp = 0;
 
   interval_list empty_il;
@@ -501,61 +592,91 @@ interval_list eval_product(ray r, uint cmd_start, uint cmd_count,
     interval_list result = empty_il;
     uint advance = 1u;
 
-    // OBB cull
-    bool _bounds_miss = cmd.bounds_skip == 1u ||
-        (cmd.bounds_type == 0u
-        ? !intersect_aabb(r.origin, r.dir, cmd.bounds_inv[0].xyz, cmd.bounds_inv[1].xyz) : !intersect_oriented(r.origin, r.dir, cmd.bounds_inv));
-    if (u_use_bounds == 1 && _bounds_miss) {
-      s_bounds += cmd.skip_children;
-      // Determine whether this miss proves the product empty
-      bool can_early_exit = (op_sp == 0); // root node miss
-      if (!can_early_exit) {
-        uint top_op = get_op_type(op_stack[op_sp - 1]);
-        uint received = get_op_received(op_stack[op_sp - 1]);
-        can_early_exit = (top_op == OP_TYPE_OPINTERSECTION) ||
-            (top_op == OP_TYPE_OPDIFFERENCE && received == 0u);
-      }
-      if (can_early_exit) return empty_il;
-      // DIFFERENCE right child miss → subtract nothing; push empty result
+    // Duplicate cache hit: reuse result for shared subtrees across products
+    if (u_use_dup_cache == 1 && cmd.duplicate_id != 0u &&
+        dup_cache_lookup(cmd.duplicate_id, result)) {
       has_result = true;
       advance = cmd.skip_children;
-    } else if (cmd.type == CMD_TYPE_PRIMITIVE) {
-      Primitive p = primitives[cmd.id];
-      ray lr;
-      lr.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
-      lr.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
-      vec2 hit = NO_HIT_SPAN;
-      if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(lr);
-      else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(lr);
-      else if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(lr, p.r1, p.r2);
-      result = make_primitive_interval(hit, cmd.id);
-      has_result = true;
-      s_leaves++;
-    } else { // CMD_TYPE_OPERATION (INTERSECTION or DIFFERENCE — no UNION in products)
-      op_stack[op_sp] = (encode_op_type(uint(operations[cmd.id].type)) << 2); // received=0
-      op_sp++;
-      i++;
-      continue;
+    }
+
+    if (!has_result) {
+      float cmd_t_near;
+      bool _bounds_miss = cmd.bounds_skip == 1u ||
+          !bounds_hit_tnear(r.origin, r.dir, cmd.bounds_type, cmd.bounds_inv, cmd_t_near) ||
+          (u_use_tbest == 1 && cmd_t_near > best_t);
+      if (u_use_bounds == 1 && _bounds_miss) {
+        s_bounds += cmd.skip_children;
+        if (op_sp == 0) return empty_il;
+        result = empty_il;
+        has_result = true;
+        advance = cmd.skip_children;
+      } else if (cmd.type == CMD_TYPE_PRIMITIVE) {
+        Primitive p = primitives[cmd.id];
+        ray lr;
+        lr.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
+        lr.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
+        vec2 hit = NO_HIT_SPAN;
+        if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(lr);
+        else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(lr);
+        else if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(lr, p.r1, p.r2);
+        result = make_primitive_interval(hit, cmd.id);
+        if (u_use_dup_cache == 1 && cmd.duplicate_id != 0u)
+          dup_cache_store(cmd.duplicate_id, result);
+        has_result = true;
+        s_leaves++;
+      } else { // CMD_TYPE_OPERATION
+        op_stack[op_sp] = make_op_entry(cmd.duplicate_id, uint(operations[cmd.id].type));
+        op_end[op_sp] = i + cmd.skip_children;
+        op_sp++;
+        i++;
+        continue;
+      }
     }
 
     // Push result and collapse completed operations
     res_stack[res_sp++] = result;
+    bool early_skipped = false;
     while (op_sp > 0) {
       op_stack[op_sp - 1]++;
-      if (get_op_received(op_stack[op_sp - 1]) < 2u) break;
+      if (get_op_received(op_stack[op_sp - 1]) < 2u) {
+        uint op_t = get_op_type(op_stack[op_sp - 1]);
+        if (res_stack[res_sp - 1].count == 0 &&
+            (op_t == OP_TYPE_OPINTERSECTION || op_t == OP_TYPE_OPDIFFERENCE)) {
+          uint skip_to = op_end[op_sp - 1];
+          uint dup = get_op_dup_id(op_stack[op_sp - 1]);
+          op_sp--;
+          if (u_use_dup_cache == 1 && dup != 0u)
+            dup_cache_store(dup, empty_il);
+          i = skip_to;
+          early_skipped = true;
+          continue;
+        }
+        break;
+      }
+
       interval_list b = res_stack[--res_sp];
       interval_list a = res_stack[--res_sp];
       op_sp--;
       uint op_t = get_op_type(op_stack[op_sp]);
-      // Intersection with empty → entire product empty (can propagate early exit)
-      if (op_t == OP_TYPE_OPINTERSECTION && (a.count == 0 || b.count == 0)) {
+      interval_list merged;
+      if ((op_t == OP_TYPE_OPINTERSECTION && (a.count == 0 || b.count == 0)) ||
+          (op_t == OP_TYPE_OPDIFFERENCE && a.count == 0)) {
         if (op_sp == 0) return empty_il;
-        res_stack[res_sp++] = empty_il;
+        merged = empty_il;
       } else {
-        res_stack[res_sp++] = merge_spans(a, b, op_t);
+        merged = merge_spans(a, b, op_t);
       }
+
+      // cache store if duplicate
+      uint dup = get_op_dup_id(op_stack[op_sp]);
+      if (u_use_dup_cache == 1 && dup != 0u)
+        dup_cache_store(dup, merged);
+
+      // push merged to the stack
+      res_stack[res_sp++] = merged;
     }
-    i += advance;
+    if (!early_skipped)
+      i += advance;
   }
 
   return (res_sp > 0) ? res_stack[0] : empty_il;
@@ -567,6 +688,7 @@ shadow_il eval_product_shadow(ray r, uint cmd_start, uint cmd_count)
   shadow_il res_stack[MAX_PRODUCT_STACK];
   int res_sp = 0;
   uint op_stack[MAX_PRODUCT_STACK];
+  uint op_end[MAX_PRODUCT_STACK];
   int op_sp = 0;
 
   shadow_il empty_il;
@@ -583,14 +705,8 @@ shadow_il eval_product_shadow(ray r, uint cmd_start, uint cmd_count)
         (cmd.bounds_type == 0u
         ? !intersect_aabb(r.origin, r.dir, cmd.bounds_inv[0].xyz, cmd.bounds_inv[1].xyz) : !intersect_oriented(r.origin, r.dir, cmd.bounds_inv));
     if (u_use_bounds == 1 && _bounds_miss) {
-      bool can_early_exit = (op_sp == 0);
-      if (!can_early_exit) {
-        uint top_op = get_op_type(op_stack[op_sp - 1]);
-        uint received = get_op_received(op_stack[op_sp - 1]);
-        can_early_exit = (top_op == OP_TYPE_OPINTERSECTION) ||
-            (top_op == OP_TYPE_OPDIFFERENCE && received == 0u);
-      }
-      if (can_early_exit) return empty_il;
+      if (op_sp == 0) return empty_il;
+      result = empty_il;
       has_result = true;
       advance = cmd.skip_children;
     } else if (cmd.type == CMD_TYPE_PRIMITIVE) {
@@ -606,26 +722,40 @@ shadow_il eval_product_shadow(ray r, uint cmd_start, uint cmd_count)
       has_result = true;
     } else {
       op_stack[op_sp] = (encode_op_type(uint(operations[cmd.id].type)) << 2);
+      op_end[op_sp] = i + cmd.skip_children;
       op_sp++;
       i++;
       continue;
     }
 
     res_stack[res_sp++] = result;
+    bool early_skipped = false;
     while (op_sp > 0) {
       op_stack[op_sp - 1]++;
-      if (get_op_received(op_stack[op_sp - 1]) < 2u) break;
+      if (get_op_received(op_stack[op_sp - 1]) < 2u) {
+        uint op_t = get_op_type(op_stack[op_sp - 1]);
+        if (res_stack[res_sp - 1].count == 0 &&
+            (op_t == OP_TYPE_OPINTERSECTION || op_t == OP_TYPE_OPDIFFERENCE)) {
+          i = op_end[op_sp - 1];
+          op_sp--;
+          early_skipped = true;
+          continue;
+        }
+        break;
+      }
       shadow_il b = res_stack[--res_sp];
       shadow_il a = res_stack[--res_sp];
       op_sp--;
       uint op_t = get_op_type(op_stack[op_sp]);
-      if (op_t == OP_TYPE_OPINTERSECTION && (a.count == 0 || b.count == 0)) {
+      if ((op_t == OP_TYPE_OPINTERSECTION && (a.count == 0 || b.count == 0)) ||
+          (op_t == OP_TYPE_OPDIFFERENCE && a.count == 0)) {
         if (op_sp == 0) return empty_il;
         res_stack[res_sp++] = empty_il;
       } else {
         res_stack[res_sp++] = merge_shadow_spans(a, b, op_t);
       }
     }
+    if (early_skipped) continue;
     i += advance;
   }
 
@@ -636,7 +766,6 @@ shadow_il eval_product_shadow(ray r, uint cmd_start, uint cmd_count)
 // Internal nodes are spatial groupings (UNION BOUNDING BOXES);
 // leaf nodes are individual products.
 // best_t tracks the closest opaque front-face hit; used to cull BVH nodes with t_near > best_t.
-// Transparent hits (alpha < 1) do not update best_t since geometry behind them still contributes.
 interval_list csg_traverse(ray r,
   inout uint s_bounds, inout uint s_nodes, inout uint s_leaves)
 {
@@ -644,56 +773,135 @@ interval_list csg_traverse(ray r,
   result.count = 0;
   float best_t = 1e30;
 
+  // clear cache
+  dup_cache_clear();
+
+  uint bvh_stack[MAX_BVH_STACK];
+  int sp = 0;
+
   uint n = uint(product_bvh.length());
-  for (uint i = 0; i < n; ) {
+  if (n == 0u) return result;
+
+  // Check root bounds before entering loop
+  ProductBVHNode root = product_bvh[0];
+  if (root.bounds_skip == 1u) return result;
+  if (u_use_bounds == 1) {
+    float t_near;
+    if (!bounds_hit_tnear(r.origin, r.dir, root.bounds_type, root.bounds_inv, t_near)) {
+      s_bounds++;
+      return result;
+    }
+  }
+  bvh_stack[sp++] = 0u;
+
+  while (sp > 0) {
+    uint i = bvh_stack[--sp];
+    if (i >= n) continue;
+
     ProductBVHNode node = product_bvh[i];
 
-    if (node.bounds_skip == 1u) {
-      i += node.skip_children;
-      continue;
-    }
+    if (node.bounds_skip == 1u) continue;
 
-    if (u_use_bounds == 1) {
+    // Re-check against best_t, may have tightened since this node was pushed before
+    if (u_use_bounds == 1 && u_use_tbest == 1) {
       float t_near;
-      bool hit = bounds_hit_tnear(r.origin, r.dir, node.bounds_type, node.bounds_inv, t_near);
-      if (!hit || t_near > best_t) {
+      if (!bounds_hit_tnear(r.origin, r.dir, node.bounds_type, node.bounds_inv, t_near)
+          || t_near > best_t) {
         s_bounds++;
-        i += node.skip_children;
         continue;
       }
     }
 
     if (node.is_leaf == 1u) {
-      interval_list prod = eval_product(r, node.cmd_start, node.cmd_count, s_bounds, s_nodes, s_leaves);
-      if (prod.count > 0 && prod.spans[0].t_enter < best_t) {
-        uint prim_id = span_prim_id(prod.spans[0]);
-        if (primitives[prim_id].color.a >= 1.0)
-          best_t = prod.spans[0].t_enter;
+      interval_list prod = eval_product(r, node.cmd_start, node.cmd_count, s_bounds, s_nodes, s_leaves, best_t);
+      if (u_use_tbest == 1 && prod.count > 0) {
+        for (int k = 0; k < prod.count; k++) {
+          float t_enter = prod.spans[k].t_enter;
+          if (t_enter < best_t) {
+            uint prim_id = span_prim_id(prod.spans[k]);
+            if (primitives[prim_id].color.a >= 1.0)
+              best_t = t_enter;
+            break;
+          }
+        }
       }
       result = merge_spans(result, prod, OP_TYPE_OPUNION);
-    }
+    } else {
+      // Internal node: test both children, push farther first (nearer popped first in neext it)
+      uint left = i + 1u;
+      uint right = i + 1u + product_bvh[left].skip_children;
 
-    i++;
+      float t_left = 1e30, t_right = 1e30;
+      bool hit_left = false, hit_right = false;
+
+      ProductBVHNode ln = product_bvh[left];
+      ProductBVHNode rn = product_bvh[right];
+
+      if (ln.bounds_skip != 1u) {
+        if (u_use_bounds == 1)
+          hit_left = bounds_hit_tnear(r.origin, r.dir, ln.bounds_type, ln.bounds_inv, t_left);
+        else {
+          hit_left = true;
+          t_left = 0.0;
+        }
+      }
+      if (rn.bounds_skip != 1u) {
+        if (u_use_bounds == 1)
+          hit_right = bounds_hit_tnear(r.origin, r.dir, rn.bounds_type, rn.bounds_inv, t_right);
+        else {
+          hit_right = true;
+          t_right = 0.0;
+        }
+      }
+
+      if (u_use_tbest == 1) {
+        if (hit_left && t_left > best_t) {
+          hit_left = false;
+          s_bounds++;
+        }
+        if (hit_right && t_right > best_t) {
+          hit_right = false;
+          s_bounds++;
+        }
+      }
+
+      // Push farther child first so nearer is popped first
+      if (hit_left && hit_right) {
+        if (t_left <= t_right) {
+          bvh_stack[sp++] = right;
+          bvh_stack[sp++] = left;
+        } else {
+          bvh_stack[sp++] = left;
+          bvh_stack[sp++] = right;
+        }
+      } else if (hit_left) {
+        bvh_stack[sp++] = left;
+      } else if (hit_right) {
+        bvh_stack[sp++] = right;
+      }
+    }
   }
   return result;
 }
 
 bool csg_shadow_test(ray r) {
+  uint bvh_stack[MAX_BVH_STACK];
+  int sp = 0;
+  bvh_stack[sp++] = 0u;
+
   uint n = uint(product_bvh.length());
-  for (uint i = 0; i < n; ) {
+
+  while (sp > 0) {
+    uint i = bvh_stack[--sp];
+    if (i >= n) continue;
+
     ProductBVHNode node = product_bvh[i];
-    if (node.bounds_skip == 1u) {
-      i += node.skip_children;
-      continue;
-    }
+    if (node.bounds_skip == 1u) continue;
 
     if (u_use_bounds == 1) {
       float t_near;
       bool hit = bounds_hit_tnear(r.origin, r.dir, node.bounds_type, node.bounds_inv, t_near);
-      if (!hit) {
-        i += node.skip_children;
-        continue;
-      }
+      if (!hit) continue;
     }
 
     if (node.is_leaf == 1u) {
@@ -701,9 +909,48 @@ bool csg_shadow_test(ray r) {
       for (int k = 0; k < si.count; k++) {
         if (shadow_span_enter(si.spans[k]) > SHADOW_T_MIN) return true;
       }
-    }
+    } else {
+      uint left = i + 1u;
+      uint right = i + 1u + product_bvh[left].skip_children;
 
-    i++;
+      float t_left = 1e30, t_right = 1e30;
+      bool hit_left = false, hit_right = false;
+
+      ProductBVHNode ln = product_bvh[left];
+      ProductBVHNode rn = product_bvh[right];
+
+      if (ln.bounds_skip != 1u) {
+        if (u_use_bounds == 1)
+          hit_left = bounds_hit_tnear(r.origin, r.dir, ln.bounds_type, ln.bounds_inv, t_left);
+        else {
+          hit_left = true;
+          t_left = 0.0;
+        }
+      }
+      if (rn.bounds_skip != 1u) {
+        if (u_use_bounds == 1)
+          hit_right = bounds_hit_tnear(r.origin, r.dir, rn.bounds_type, rn.bounds_inv, t_right);
+        else {
+          hit_right = true;
+          t_right = 0.0;
+        }
+      }
+
+      // Push farther child first so nearer is popped first
+      if (hit_left && hit_right) {
+        if (t_left <= t_right) {
+          bvh_stack[sp++] = right;
+          bvh_stack[sp++] = left;
+        } else {
+          bvh_stack[sp++] = left;
+          bvh_stack[sp++] = right;
+        }
+      } else if (hit_left) {
+        bvh_stack[sp++] = left;
+      } else if (hit_right) {
+        bvh_stack[sp++] = right;
+      }
+    }
   }
   return false;
 }
@@ -762,6 +1009,7 @@ void main() {
     wg_nodes_visited = 0u;
     wg_leaves_visited = 0u;
   }
+
   barrier();
 
   ivec2 px = ivec2(gl_GlobalInvocationID.xy);
@@ -771,9 +1019,16 @@ void main() {
 
   if (px.x < dims.x && px.y < dims.y) {
     vec4 avg = vec4(0.0);
+    const vec2 rgss4[4] = vec2[](
+        vec2(0.125, 0.375), vec2(0.375, -0.125),
+        vec2(-0.125, -0.375), vec2(-0.375, 0.125)
+      );
+    const vec2 rgss2[2] = vec2[](vec2(-0.25, -0.25), vec2(0.25, 0.25));
     for (int s = 0; s < u_samples; s++) {
-      vec2 jitter = vec2(hash(vec2(px) + float(s)),
-          hash(vec2(px) + float(s) * 2.0)) - 0.5;
+      vec2 jitter;
+      if (u_samples == 4) jitter = rgss4[s];
+      else if (u_samples == 2) jitter = rgss2[s];
+      else jitter = vec2(0.0);
       vec2 uv = (vec2(px) + jitter) / vec2(dims) * 2.0 - 1.0;
       float th = tan(radians(fov) * 0.5);
       vec3 ldir = normalize(vec3(uv.x * aspectRatio * th, uv.y * th, -1.0));
