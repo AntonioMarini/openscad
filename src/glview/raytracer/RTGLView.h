@@ -18,13 +18,6 @@
 
 #include <QElapsedTimer>
 
-/***
- * Class responsible for handling and viewing, in a QT widget, the RT CSG Tree.
- *
- * This takes lot of duplicate code from QGLView.cc (Openscad preview widget), should be refactored to be
- * a cleaner solution.
- *
- */
 class RTGLView : public QOpenGLWidget
 {
   Q_OBJECT
@@ -61,14 +54,16 @@ private:
   void rebuildGPUData();
   GLuint compileComputeShader(const std::string& source, int maxStack,
                               const std::string& define_name = "MAX_STACK");
-  GLuint compileQuadShader(const std::string& vertSrc, const std::string& fragSrc);
 
   QElapsedTimer fpsTimer;
   int frameCount = 0;
   float currentFps = 0.0f;
 
+  GLuint gpuTimerQuery = 0;
+  float computeMs = 0.0f;
+
   // Configurable shader uniforms
-  int rtUseBounds = 1, rtUseCache = 1, rtUseShadows = 1, rtSamples = 1, rtUseTBest = 1;
+  int rtUseBounds = 1, rtUseCache = 1, rtUseShadows = 0, rtSamples = 1, rtUseTBest = 1, rtUseAO = 0;
   int rtProductBVH = 1;
 
   // Benchmark orbit state
@@ -79,12 +74,14 @@ private:
   Camera benchmarkCam;
   int benchStep = 0;
   bool benchScreenshotTaken = false;
-  std::vector<float> benchFrameMs;
-  uint64_t benchBoundsSkippedTotal = 0;
-  uint64_t benchNodesVisitedTotal = 0;
-  uint64_t benchLeavesVisitedTotal = 0;
+  struct FrameStats {
+    float ms;
+    uint32_t boundsSkipped;
+    uint32_t nodesVisited;
+    uint32_t leavesVisited;
+  };
+  std::vector<FrameStats> benchFrames;
   QTimer *benchTimer = nullptr;
-  QElapsedTimer benchFrameTimer;
 
   void advanceBenchmarkStep();
   void finishBenchmark();
@@ -104,13 +101,8 @@ private:
   // Colorscheme
   const ColorScheme *colorscheme = nullptr;
 
-  // axes and crosshair
-  void showAxes(const Color4f& col);
-  void showCrosshairs(const Color4f& col);
-  void showScalemarkers(const Color4f& col);
   void showSmallaxes(const Color4f& col);
   float getDPI();
-  void decodeMarkerValue(double i, double l, int size_div_sm);
 
   // GPU handles
   GLuint computeProgram = 0;
@@ -128,6 +120,8 @@ private:
   GLuint statsSSBO = 0;
 
   bool initialized = false;
+  int accumFrame = 0;
+  int maxAccumFrames = 1;
 
   // Compute shader source and current MAX_STACK compile-time constant
   std::string computeShaderSrc;

@@ -2,9 +2,9 @@
 //
 // Benchmark designed to isolate the OBB-culling benefit of CSG distribution
 
-N_cR = 40;     // large right side: N_cR × N_cR = 64 spheres
+N_cR = 20;    
 sp_c = 20;
-r_c  = 4.5;
+r_c  = 8.5;
 
 
 color("red")

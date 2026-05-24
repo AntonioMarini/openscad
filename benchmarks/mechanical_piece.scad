@@ -1,3 +1,8 @@
+scale([20,20,20])
+union(){
+//cube([1000,1000,1]);
+
+color("slategrey")
 intersection() {
 translate([-3.776, -6, -1.966]) cube(size = [7.552, 12, 3.931], center = false);
 union() {
@@ -278,6 +283,7 @@ rotate([90, 0, 0])
 translate([0.991, -0.431, -0.448]) cube(size = [17.109, 1.034, 0.207], center = false);
 rotate([90, 0, 0])
 translate([0.302, 0.431, -1.138]) cube(size = [0.69, 0.172, 0.207], center = false);
+}
 }
 }
 }

@@ -144,6 +144,7 @@
 #include "utils/printutils.h"
 #include "version.h"
 #include "raytracer/RTCSGTreeVisitor.h"
+#include "raytracer/CSGTree.h"
 
 #ifdef ENABLE_CGAL
 #include "geometry/cgal/cgal.h"
@@ -1483,15 +1484,18 @@ void MainWindow::compileCSG()
     this->rtRoot = rtVisitor.buildRTTree(*this->tree.root());
     int rtPreDistNodeCount = rtVisitor.nodeCount;
     std::cout << "[RT] Nodes before distribution: " << rtPreDistNodeCount << std::endl;
+    CSGTree::print_tree_labeled("CSG Tree BEFORE distribution", this->rtRoot);
 
     // In benchmark mode: rtUseDistribution controls distribution, regardless of DNF path.
     // In normal interactive mode: distribute only when not using DNF (current behavior).
-    bool shouldDistribute =
-      benchmarkConfig.active ? (benchmarkConfig.rtUseDistribution != 0) : true;
+    bool shouldDistribute = benchmarkConfig.active ? (benchmarkConfig.rtUseDistribution != 0) : true;
     if (shouldDistribute) {
       this->rtRoot = rtVisitor.distributeOperation(this->rtRoot);
+      this->rtRoot = rtVisitor.balanceDifferenceChains(this->rtRoot);
     }
     rtVisitor.recomputeStats(this->rtRoot);
+    CSGTree::print_tree_labeled("CSG Tree AFTER distribution", this->rtRoot);
+
     std::cout << "[RT] Nodes after distribution: " << rtVisitor.nodeCount << std::endl;
 
     this->rtNodeCount = rtVisitor.nodeCount;
@@ -3000,12 +3004,17 @@ void MainWindow::actionExportFileFormat(int fmt)
   } break;
   case FileFormat::PNG: {
     // Grab first to make sure dialog box isn't part of the grabbed image
-    qglview->grabFrame();
+    QImage exportImage;
+    if (this->rtglview && this->rtglview->isVisible()) {
+      exportImage = this->rtglview->grabFramebuffer();
+    } else {
+      exportImage = qglview->grabFrame();
+    }
     const QString suffix = "png";
     auto img_filename =
       QFileDialog::getSaveFileName(this, _("Export Image"), exportPath(suffix), _("PNG Files (*.png)"));
     if (!img_filename.isEmpty()) {
-      const bool saveResult = qglview->save(img_filename.toStdString().c_str());
+      const bool saveResult = exportImage.save(img_filename, "PNG");
       if (saveResult) {
         this->exportPaths[suffix] = img_filename;
         setCurrentOutput();
@@ -3040,7 +3049,12 @@ void MainWindow::copyText()
 
 void MainWindow::actionCopyViewport()
 {
-  const auto& image = qglview->grabFrame();
+  QImage image;
+  if (this->rtglview && this->rtglview->isVisible()) {
+    image = this->rtglview->grabFramebuffer();
+  } else {
+    image = qglview->grabFrame();
+  }
   auto clipboard = QApplication::clipboard();
   clipboard->setImage(image);
 }

@@ -1,7 +1,6 @@
 // RTGLView.cc
 #include "RTGLView.h"
 
-#include "glview/hershey.h"
 #include "raytracer/CSGCommand.h"
 #include "raytracer/CSGTree.h"
 #include "glview/system-gl.h"
@@ -13,18 +12,7 @@
 #include <filesystem>
 #include <iostream>
 #include <cmath>
-#include <numeric>
 #include <string>
-
-static std::string loadShaderFile(const std::string& path)
-{
-  QFile file(QString::fromStdString(path));
-  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-    std::cerr << "[RT] Failed to load shader: " << path << std::endl;
-    return "";
-  }
-  return file.readAll().toStdString();
-}
 
 RTGLView::RTGLView(QWidget *parent) : QOpenGLWidget(parent)
 {
@@ -45,6 +33,7 @@ RTGLView::~RTGLView()
   if (outputTexture) glDeleteTextures(1, &outputTexture);
   if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
   if (quadVBO) glDeleteBuffers(1, &quadVBO);
+  if (gpuTimerQuery) glDeleteQueries(1, &gpuTimerQuery);
   if (computeProgram) glDeleteProgram(computeProgram);
   if (quadProgram) glDeleteProgram(quadProgram);
   doneCurrent();
@@ -79,7 +68,6 @@ void RTGLView::initializeGL()
   auto depthShader = ShaderUtils::compileShaderProgram(vertSrc, depthSrc);
   depthCopyProgram = depthShader.shader_program;
 
-  // Setup fullscreen quad
   float quadVertices[] = {
     -1.0f, 1.0f, 0.0f, 0.0f, 1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f,
     1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 1.0f,  -1.0f, 0.0f, 1.0f, 0.0f,
@@ -101,6 +89,8 @@ void RTGLView::initializeGL()
 
   glBindVertexArray(0);
 
+  glGenQueries(1, &gpuTimerQuery);
+
   initialized = true;
 }
 
@@ -119,7 +109,7 @@ void RTGLView::resizeGL(int w, int h)
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-  glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+  glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
 
   if (depthTexture) glDeleteTextures(1, &depthTexture);
 
@@ -130,6 +120,7 @@ void RTGLView::resizeGL(int w, int h)
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
+  accumFrame = 0;
 }
 
 // ---- Paint (main render) ----
@@ -193,6 +184,7 @@ void RTGLView::paintGL()
   if (needsRebuild) {
     rebuildGPUData();
     needsRebuild = false;
+    accumFrame = 0;
   }
 
   // Reset GPU stats before each measured frame so per-frame values fit in uint32
@@ -211,12 +203,15 @@ void RTGLView::paintGL()
   glUniform1f(glGetUniformLocation(activeProgram, "fov"), fov);
   glUniform1f(glGetUniformLocation(activeProgram, "aspectRatio"), aspectRatio);
   glUniform3f(glGetUniformLocation(activeProgram, "u_light_dir"), -1.0f, -1.0f, 1.0f);
-  glUniform1i(glGetUniformLocation(activeProgram, "u_samples"), 1);
-  glUniform1i(glGetUniformLocation(activeProgram, "u_rendering_mode"), 1);
+  bool interactive = mouse_drag_active;
+  glUniform1i(glGetUniformLocation(activeProgram, "u_samples"), 4);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_rendering_mode"), 0);
   glUniform1i(glGetUniformLocation(activeProgram, "u_use_bounds"), rtUseBounds);
   glUniform1i(glGetUniformLocation(activeProgram, "u_use_tbest"), rtUseTBest);
   glUniform1i(glGetUniformLocation(activeProgram, "u_use_shadows"), 0);
-  glUniform1i(glGetUniformLocation(activeProgram, "u_use_dup_cache"), 1);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_dup_cache"), rtUseCache);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_frame_index"), accumFrame);
+  glUniform1i(glGetUniformLocation(activeProgram, "u_use_ao"), 0);
 
   if (colorscheme) {
     Color4f bg = ColorMap::getColor(*colorscheme, RenderColor::BACKGROUND_COLOR);
@@ -266,15 +261,23 @@ void RTGLView::paintGL()
   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, statsSSBO);
 
   // Bind output textures (color + depth)
-  glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+  glBindImageTexture(0, outputTexture, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
   glBindImageTexture(1, depthTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
 
-  // start benchmark timer
-  if (benchConfig.active && benchStep > 0) benchFrameTimer.start();
+  // (GPU timing via GL_TIME_ELAPSED query below)
 
-  // Dispatch
+  // Dispatch (timed with GL timer query)
+  glBeginQuery(GL_TIME_ELAPSED, gpuTimerQuery);
   glDispatchCompute(((w + 7) / 8), ((h + 7) / 8), 1);
   glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+  glEndQuery(GL_TIME_ELAPSED);
+
+  // Read back GPU compute time
+  GLuint64 elapsedNs = 0;
+  glGetQueryObjectui64v(gpuTimerQuery, GL_QUERY_RESULT, &elapsedNs);
+  computeMs = static_cast<float>(elapsedNs) / 1e6f;
+
+  accumFrame++;
 
   // ---- Draw fullscreen quad (color) ----
   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -335,15 +338,9 @@ void RTGLView::paintGL()
   glTranslated(openscadCam->object_trans.x(), openscadCam->object_trans.y(),
                openscadCam->object_trans.z());
 
-  showAxes(axesColor);
-  showScalemarkers(axesColor);
-
-  // Small axes in corner (has its own projection, always on top)
   glDisable(GL_DEPTH_TEST);
   showSmallaxes(axesColor);
   glEnable(GL_DEPTH_TEST);
-
-  glFinish();  // sync GPU — timer stops here
 
   if (benchConfig.active) {
     if (benchStep == 0) {
@@ -354,10 +351,10 @@ void RTGLView::paintGL()
       }
       benchScreenshotTaken = true;
     } else {
-      float ms = benchFrameTimer.nsecsElapsed() / 1e6f;
-      benchFrameMs.push_back(ms);
+      float ms = computeMs;
+      FrameStats fs{ms, 0, 0, 0};
 
-      // Read back per-frame GPU stats and accumulate as uint64_t to avoid overflow.
+      // Read back per-frame GPU stats.
       // SSBO was reset at the start of this frame, so values represent this frame only.
       if (statsSSBO) {
         glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
@@ -365,20 +362,24 @@ void RTGLView::paintGL()
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsSSBO);
         glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, 3 * sizeof(uint32_t), gpuStats);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-        benchBoundsSkippedTotal += gpuStats[0];
-        benchNodesVisitedTotal += gpuStats[1];
-        benchLeavesVisitedTotal += gpuStats[2];
+        fs.boundsSkipped = gpuStats[0];
+        fs.nodesVisited = gpuStats[1];
+        fs.leavesVisited = gpuStats[2];
       }
+      benchFrames.push_back(fs);
     }
     advanceBenchmarkStep();
   }
-  // update(); Uncomment this for continuous frame generetion intead of input directed
+  if (accumFrame < maxAccumFrames || benchConfig.active) {
+    update();
+  }
 }
 
 void RTGLView::setCamera(const Camera *cam)
 {
   this->openscadCam = cam;
   this->fov = cam->fovValue();
+  accumFrame = 0;
   update();
 }
 
@@ -584,152 +585,6 @@ void RTGLView::showSmallaxes(const Color4f& col)
   glEnd();
 }
 
-void RTGLView::showAxes(const Color4f& col)
-{
-  // Large gray axis cross inline with the model
-  glLineWidth(this->getDPI());
-  glColor3f(col.r(), col.g(), col.b());
-
-  glBegin(GL_LINES);
-  glVertex4d(0, 0, 0, 1);
-  glVertex4d(1, 0, 0, 0);  // w = 0 goes to infinity
-  glVertex4d(0, 0, 0, 1);
-  glVertex4d(0, 1, 0, 0);
-  glVertex4d(0, 0, 0, 1);
-  glVertex4d(0, 0, 1, 0);
-  glEnd();
-
-  glPushAttrib(GL_LINE_BIT);
-  glEnable(GL_LINE_STIPPLE);
-  glLineStipple(3, 0xAAAA);
-  glBegin(GL_LINES);
-  glVertex4d(0, 0, 0, 1);
-  glVertex4d(-1, 0, 0, 0);
-  glVertex4d(0, 0, 0, 1);
-  glVertex4d(0, -1, 0, 0);
-  glVertex4d(0, 0, 0, 1);
-  glVertex4d(0, 0, -1, 0);
-  glEnd();
-  glPopAttrib();
-}
-
-void RTGLView::showCrosshairs(const Color4f& col)
-{
-  glLineWidth(this->getDPI());
-  glColor3f(col.r(), col.g(), col.b());
-  glBegin(GL_LINES);
-  for (double xf : {-1.0, 1.0})
-    for (double yf : {-1.0, 1.0}) {
-      auto vd = openscadCam->zoomValue() / 8;
-      glVertex3d(-xf * vd, -yf * vd, -vd);
-      glVertex3d(+xf * vd, +yf * vd, +vd);
-    }
-  glEnd();
-}
-
-void RTGLView::showScalemarkers(const Color4f& col)
-{
-  // Add scale ticks on large axes
-  auto l = openscadCam->zoomValue();
-  glLineWidth(this->getDPI());
-  glColor3f(col.r(), col.g(), col.b());
-
-  // Take log of l, discretize, then exponentiate. This is done so that the tick
-  // denominations change every time the viewport gets 10x bigger or smaller,
-  // but stays constant in-between. l_adjusted is a step function of l.
-  const int log_l = static_cast<int>(floor(log10(l)));
-  const double l_adjusted = pow(10, log_l);
-
-  // Calculate tick width.
-  const double tick_width = l_adjusted / 10.0;
-
-  const int size_div_sm = 60;  // divisor for l to determine minor tick size
-  int line_cnt = 0;
-
-  size_t divs = l / tick_width;
-  for (size_t div = 0; div < divs; ++div) {
-    double i = div * tick_width;  // i represents the position along the axis
-    int size_div;
-    if (line_cnt > 0 && line_cnt % 10 == 0) {          // major tick
-      size_div = size_div_sm * .5;                     // resize to a major tick
-      RTGLView::decodeMarkerValue(i, l, size_div_sm);  // print number
-    } else {                                           // minor tick
-      size_div = size_div_sm;                          // set the minor tick to the standard size
-
-      // Draw additional labels if there are few major tick labels visible due to
-      // zoom. Because the spacing/units of major tick marks only change when the
-      // viewport changes size by a factor of 10, it can be hard to see the
-      // major tick labels when when the viewport is slightly larger than size at
-      // which the last tick spacing change occurred. When zoom level is such
-      // that very few major tick marks are visible, additional labels are drawn
-      // every 2 minor ticks. We can detect that very few major ticks are visible
-      // by checking if the viewport size is larger than the adjusted scale by
-      // only a small ratio.
-      const double more_labels_threshold = 3;
-      // draw additional labels every 2 minor ticks
-      const int more_labels_freq = 2;
-      if (line_cnt > 0 && line_cnt % more_labels_freq == 0 && l / l_adjusted < more_labels_threshold) {
-        RTGLView::decodeMarkerValue(i, l, size_div_sm);  // print number
-      }
-    }
-    line_cnt++;
-
-    /*
-     * The length of each tick is proportional to the length of the axis
-     * (which changes with the zoom value.) l/size_div provides the
-     * proportional length
-     *
-     * Commented glVertex3d lines provide additional 'arms' for the tick
-     * the number of arms will (hopefully) eventually be driven via Preferences
-     */
-
-    // positive axes
-    glBegin(GL_LINES);
-    // x
-    glVertex3d(i, 0, 0);
-    glVertex3d(i, -l / size_div, 0);  // 1 arm
-    // glVertex3d(i,-l/size_div,0); glVertex3d(i,l/size_div,0); // 2 arms
-    // glVertex3d(i,0,-l/size_div); glVertex3d(i,0,l/size_div); // 4 arms (w/ 2 arms line)
-
-    // y
-    glVertex3d(0, i, 0);
-    glVertex3d(-l / size_div, i, 0);  // 1 arm
-    // glVertex3d(-l/size_div,i,0); glVertex3d(l/size_div,i,0); // 2 arms
-    // glVertex3d(0,i,-l/size_div); glVertex3d(0,i,l/size_div); // 4 arms (w/ 2 arms line)
-
-    // z
-    glVertex3d(0, 0, i);
-    glVertex3d(-l / size_div, 0, i);  // 1 arm
-    // glVertex3d(-l/size_div,0,i); glVertex3d(l/size_div,0,i); // 2 arms
-    // glVertex3d(0,-l/size_div,i); glVertex3d(0,l/size_div,i); // 4 arms (w/ 2 arms line)
-    glEnd();
-
-    // negative axes
-    glPushAttrib(GL_LINE_BIT);
-    glEnable(GL_LINE_STIPPLE);
-    glLineStipple(3, 0xAAAA);
-    glBegin(GL_LINES);
-    // x
-    glVertex3d(-i, 0, 0);
-    glVertex3d(-i, -l / size_div, 0);  // 1 arm
-    // glVertex3d(-i,-l/size_div,0); glVertex3d(-i,l/size_div,0); // 2 arms
-    // glVertex3d(-i,0,-l/size_div); glVertex3d(-i,0,l/size_div); // 4 arms (w/ 2 arms line)
-
-    // y
-    glVertex3d(0, -i, 0);
-    glVertex3d(-l / size_div, -i, 0);  // 1 arm
-    // glVertex3d(-l/size_div,-i,0); glVertex3d(l/size_div,-i,0); // 2 arms
-    // glVertex3d(0,-i,-l/size_div); glVertex3d(0,-i,l/size_div); // 4 arms (w/ 2 arms line)
-
-    // z
-    glVertex3d(0, 0, -i);
-    glVertex3d(-l / size_div, 0, -i);  // 1 arm
-    // glVertex3d(-l/size_div,0,-i); glVertex3d(l/size_div,0,-i); // 2 arms
-    // glVertex3d(0,-l/size_div,-i); glVertex3d(0,l/size_div,-i); // 4 arms (w/ 2 arms line)
-    glEnd();
-    glPopAttrib();
-  }
-}
 
 void RTGLView::setColorScheme(const ColorScheme *cs) { this->colorscheme = cs; }
 
@@ -760,11 +615,8 @@ void RTGLView::startBenchmarkOrbit()
   openscadCam = &benchmarkCam;
 
   benchStep = 0;
-  benchFrameMs.clear();
+  benchFrames.clear();
   benchScreenshotTaken = false;
-  benchBoundsSkippedTotal = 0;
-  benchNodesVisitedTotal = 0;
-  benchLeavesVisitedTotal = 0;
 
   if (benchConfig.bench_width > 0 && benchConfig.bench_height > 0) {
     qreal dpr = devicePixelRatio();
@@ -807,92 +659,48 @@ void RTGLView::finishBenchmark()
 {
   if (benchTimer) benchTimer->stop();
 
-  // Write CSV
+  // Write CSV with per-frame GPU stats
   std::string csvPath = benchConfig.output_dir + "/measurements.csv";
   std::ofstream csv(csvPath);
-  csv << "step,rot_degrees,frame_ms,fps\n";
-  for (int i = 0; i < static_cast<int>(benchFrameMs.size()); ++i) {
-    float ms = benchFrameMs[i];
-    float fps = ms > 0.0f ? 1000.0f / ms : 0.0f;
+  csv << "step,rot_degrees,frame_ms,fps,nodes_visited,leaves_visited\n";
+  uint64_t nodesVisitedTotal = 0, leavesVisitedTotal = 0;
+  for (int i = 0; i < static_cast<int>(benchFrames.size()); ++i) {
+    const auto& fs = benchFrames[i];
+    float fps = fs.ms > 0.0f ? 1000.0f / fs.ms : 0.0f;
     double rot_degrees = static_cast<double>(i + 1) * 360.0 / static_cast<double>(benchConfig.steps);
-    csv << (i + 1) << "," << rot_degrees << "," << ms << "," << fps << "\n";
+    csv << (i + 1) << "," << rot_degrees << "," << fs.ms << "," << fps << "," << fs.nodesVisited << ","
+        << fs.leavesVisited << "\n";
+    nodesVisitedTotal += fs.nodesVisited;
+    leavesVisitedTotal += fs.leavesVisited;
   }
   csv.close();
 
   // Print summary
-  if (!benchFrameMs.empty()) {
-    float total = std::accumulate(benchFrameMs.begin(), benchFrameMs.end(), 0.0f);
-    float avg_ms = total / static_cast<float>(benchFrameMs.size());
+  if (!benchFrames.empty()) {
+    float total = 0.0f;
+    float min_ms = benchFrames[0].ms, max_ms = benchFrames[0].ms;
+    for (const auto& fs : benchFrames) {
+      total += fs.ms;
+      min_ms = std::min(min_ms, fs.ms);
+      max_ms = std::max(max_ms, fs.ms);
+    }
+    float avg_ms = total / static_cast<float>(benchFrames.size());
     float avg_fps = avg_ms > 0.0f ? 1000.0f / avg_ms : 0.0f;
-    float min_ms = *std::min_element(benchFrameMs.begin(), benchFrameMs.end());
-    float max_ms = *std::max_element(benchFrameMs.begin(), benchFrameMs.end());
     float max_fps = min_ms > 0.0f ? 1000.0f / min_ms : 0.0f;
     float min_fps = max_ms > 0.0f ? 1000.0f / max_ms : 0.0f;
 
     const int px = width() * devicePixelRatio();
     const int py = height() * devicePixelRatio();
-    std::cout << "[BENCH] total_frames=" << benchFrameMs.size() << " avg_fps=" << avg_fps
+    std::cout << "[BENCH] total_frames=" << benchFrames.size() << " avg_fps=" << avg_fps
               << " min_fps=" << min_fps << " max_fps=" << max_fps << " node_count=" << benchNodeCount
               << " tree_depth=" << benchTreeDepth << " render_w=" << px << " render_h=" << py
-              << " nodes_visited=" << benchNodesVisitedTotal
-              << " leaves_visited=" << benchLeavesVisitedTotal << " output=" << benchConfig.output_dir
-              << std::endl;
+              << " nodes_visited=" << nodesVisitedTotal << " leaves_visited=" << leavesVisitedTotal
+              << " output=" << benchConfig.output_dir << std::endl;
   }
 
   QApplication::quit();
 }
 
-void RTGLView::decodeMarkerValue(double i, double l, int size_div_sm)
-{
-  // We draw both at once the positive and corresponding negative number.
-  const std::string pos_number_str = STR(i);
-  const std::string neg_number_str = "-" + pos_number_str;
-
-  const float font_size = (l / size_div_sm);
-  const float baseline_offset = font_size / 5;  // hovering a bit above axis
-
-  // Length of the minus sign. We want the digits to be centered around
-  // their ticks, but not have the minus prefix shift center of gravity.
-  const float prefix_offset = hershey::TextWidth("-", font_size) / 2;
-
-  // Draw functions that help map 2D axis label drawings into their plane.
-  // Since we're just on axis, no need for fancy affine transformation,
-  // just calling glVertex3d() with coordinates in the right plane.
-  using PlaneVertexDraw =
-    std::function<void(float x, float y, float font_height, float baseline_offset)>;
-
-  const PlaneVertexDraw axis_draw_planes[3] = {
-    [](float x, float y, float /*fh*/, float bl) {
-      glVertex3d(x, y + bl, 0);  // x-label along x-axis; font drawn above line
-    },
-    [](float x, float y, float fh, float bl) {
-      glVertex3d(-y + (fh + bl), x, 0);  // y-label along y-axis; font below
-    },
-    [](float x, float y, float fh, float bl) {
-      glVertex3d(-y + (fh + bl), 0, x);  // z-label along z-axis; font below
-    },
-  };
-  bool needs_glend = false;
-  for (const PlaneVertexDraw& axis_draw : axis_draw_planes) {
-    // We get 'plot instructions', a sequence of vertices. Translate into gl ops
-    const auto plot_fun = [&](bool pen_down, float x, float y) {
-      if (!pen_down) {  // Start a new line, coordinates just move not draw
-        if (needs_glend) glEnd();
-        glBegin(GL_LINE_STRIP);
-        needs_glend = true;
-      }
-      axis_draw(x, y, font_size, baseline_offset);
-    };
-
-    hershey::DrawTextHershey(pos_number_str, i, 0, hershey::TextAlign::kCenter, font_size, plot_fun);
-    if (needs_glend) glEnd();
-    needs_glend = false;
-    hershey::DrawTextHershey(neg_number_str, -i - prefix_offset, 0, hershey::TextAlign::kCenter,
-                             font_size, plot_fun);
-    if (needs_glend) glEnd();
-    needs_glend = false;
-  }
-}
 
 // ---- Keyboard input (basic camera for testing) ----
 
@@ -908,13 +716,17 @@ void RTGLView::keyPressEvent(QKeyEvent *event)
   case Qt::Key_E: camPos.y() -= step; break;
   default:        QOpenGLWidget::keyPressEvent(event); return;
   }
+  accumFrame = 0;
   update();  // trigger repaint
 }
 
 void RTGLView::setQGLView(QGLView *view)
 {
   this->qglview = view;
-  connect(qglview, &QGLView::cameraChanged, this, QOverload<>::of(&QOpenGLWidget::update));
+  connect(qglview, &QGLView::cameraChanged, this, [this]() {
+    accumFrame = 0;
+    update();
+  });
 }
 
 // Mouse events
@@ -982,6 +794,8 @@ void RTGLView::mouseReleaseEvent(QMouseEvent *event)
 {
   Q_UNUSED(event);
   this->mouse_drag_active = false;
+  accumFrame = 0;
+  update();
 }
 
 void RTGLView::mouseDoubleClickEvent(QMouseEvent *event) { Q_UNUSED(event); }

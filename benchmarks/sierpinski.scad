@@ -1,9 +1,11 @@
-// Sierpinski tetrahedron fractal
-// 4 sub-copies per level → 4^level leaf tetrahedra (each = intersection of 4 cubes)
+// Sierpinski tetrahedron fractal — additive (union of 4 corner sub-tetrahedra)
+// Uses only cube intersections so the raytracer can handle it as CSG primitives.
+// Union-of-intersections is already in sum-of-products form, so F5 preview
+// normalizes trivially (no combinatorial explosion).
 
-level = 5;
+level = 3;
 
-// Tetrahedron via intersection of 4 rotated+translated cubes.
+// Tetrahedron via intersection of 4 rotated+translated cubes, centered at origin.
 module tetrahedron(edge) {
   big = edge * 2;
   r = edge * sqrt(6) / 12;
@@ -25,23 +27,20 @@ module tetrahedron(edge) {
   }
 }
 
-// Sierpinski recursion using midpoint vertices
-module sierpinski(verts, lvl) {
+// Recursively place 4 half-scale tetrahedra at the corners.
+module sierpinski(edge, lvl) {
   if (lvl == 0) {
-    center = (verts[0] + verts[1] + verts[2] + verts[3]) / 4;
-    edge = norm(verts[0] - verts[1]);
-    translate(center)
-      tetrahedron(edge);
+    tetrahedron(edge);
   } else {
-    for (i = [0:3])
-      sierpinski([for (j = [0:3]) (verts[i] + verts[j]) / 2], lvl - 1);
+    d = edge * sqrt(6) / 8;
+    for (n = [[1,1,1], [1,-1,-1], [-1,1,-1], [-1,-1,1]])
+      translate(d * n / sqrt(3))
+        sierpinski(edge / 2, lvl - 1);
   }
 }
 
-v0 = [1, 1, 1];
-v1 = [1, -1, -1];
-v2 = [-1, 1, -1];
-v3 = [-1, -1, 1];
+edge = 40 * sqrt(2);
 
+rotate([45,-35,0])
 color("goldenrod")
-sierpinski([v0 * 20, v1 * 20, v2 * 20, v3 * 20], level);
+sierpinski(edge, level);

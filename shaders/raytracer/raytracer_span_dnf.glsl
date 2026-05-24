@@ -20,12 +20,14 @@ uniform int u_use_shadows;
 uniform int u_use_dup_cache;
 uniform int u_samples;
 uniform int u_rendering_mode;
+uniform int u_frame_index;
+uniform int u_use_ao;
 
-#define MAX_SPANS        3
+#define MAX_SPANS        2
 #define MAX_SHADOW_SPANS 2
 #define SHADOW_T_MIN     0.01
-#define MAX_BVH_STACK    20
 #define MAX_DUP_CACHE    4
+#define MAX_BVH_STACK    32
 
 // Primitive type constants — must match Primitive.h
 const uint PRIMITIVE_TYPE_SPHERE = 1u;
@@ -47,9 +49,9 @@ const vec2 NO_HIT_SPAN = vec2(1.0 / 0.0, -1.0 / 0.0);
 
 struct Primitive {
   int type;
-  float r1;
-  float r2;
   int defaultColor;
+  int _pad0;
+  int _pad1;
   vec4 color;
   mat4 inv_transform;
 };
@@ -187,7 +189,7 @@ uint get_op_received(uint e) {
 // indexed by gl_LocalInvocationIndex, so cached span lists are ray-private.
 #define WG_SIZE 64
 
-shared uint          wg_span_cache_keys[MAX_DUP_CACHE][WG_SIZE];
+shared uint wg_span_cache_keys[MAX_DUP_CACHE][WG_SIZE];
 shared interval_list wg_span_cache[MAX_DUP_CACHE][WG_SIZE];
 
 void dup_cache_clear() {
@@ -286,77 +288,95 @@ vec2 intersect_box_AABB(ray r) {
   return vec2(te, tx);
 }
 
-vec2 cylinder_cap_check(ray r, float te, float tx,
-    float ty_enter, float ty_exit, float r1, float r2) {
-  if (te >= tx) return NO_HIT_SPAN;
-  // Cap radius check: if entry/exit is on a cap, verify inside circle
+// Homogeneous cylinder cap check: caps at Y/W = +/-0.5, i.e. Y +/- 0.5*W = 0
+// Checks that X^2+Z^2 <= W^2 at cap hit points (with tolerance for cap-side seam).
+vec2 cylinder_cap_check_h(vec4 P0, vec4 D, float te, float tx,
+  float ty_enter, float ty_exit) {
+  if (te > tx + 1e-6) return NO_HIT_SPAN;
+  // Entry cap check: if ray enters through a cap, verify it's inside the disk.
+  // Reject the entire span — entry is outside the cylinder.
   if (te == ty_enter) {
-    vec2 p = r.origin.xz + te * r.dir.xz;
-    float cap_r = (r.origin.y + te * r.dir.y < 0.0) ? r1 : r2;
-    if (dot(p, p) > cap_r * cap_r) return NO_HIT_SPAN;
+    float X = P0.x + te * D.x;
+    float Z = P0.z + te * D.z;
+    float W = P0.w + te * D.w;
+    float r2 = X * X + Z * Z;
+    float w2 = W * W;
+    if (r2 > w2 + max(w2 * 1e-3, 1e-6)) return NO_HIT_SPAN;
   }
+  // Exit cap check: if ray exits through a cap, verify it's inside the disk.
+  // Do NOT reject the span — the entry (through the side) is still valid.
+  // Clamp tx back to the side exit to avoid a gap at the cap-side seam.
   if (tx == ty_exit) {
-    vec2 p = r.origin.xz + tx * r.dir.xz;
-    float cap_r = (r.origin.y + tx * r.dir.y < 0.0) ? r1 : r2;
-    if (dot(p, p) > cap_r * cap_r) return NO_HIT_SPAN;
+    float X = P0.x + tx * D.x;
+    float Z = P0.z + tx * D.z;
+    float W = P0.w + tx * D.w;
+    float r2 = X * X + Z * Z;
+    float w2 = W * W;
+    if (r2 > w2 + max(w2 * 1e-3, 1e-6)) {
+      // Exit is outside disk — shrink span slightly rather than rejecting.
+      // This handles the cap-side seam where FP error pushes r2 past w2.
+      tx = te;
+    }
   }
   return vec2(te, tx);
 }
 
-vec2 intersect_cylinder(ray r, float r1, float r2) {
-  // Cylinder along Y axis, y in [-0.5, 0.5], radius r1 (bottom) to r2 (top)
+// Intersect unit cylinder in homogeneous (projective) coordinates.
+// Surface: X^2 + Z^2 = W^2, caps at Y/W = +/-0.5
+// P0 = C * vec4(origin, 1), D = C * vec4(dir, 0) where C is the combined
+// projective inv_transform (incorporates cone-to-cylinder mapping).
+vec2 intersect_cylinder_h(vec4 P0, vec4 D) {
+  // Quadratic for X^2 + Z^2 - W^2 = 0
+  float a = D.x * D.x + D.z * D.z - D.w * D.w;
+  float bh = P0.x * D.x + P0.z * D.z - P0.w * D.w;
+  float c = P0.x * P0.x + P0.z * P0.z - P0.w * P0.w;
 
-  float slope = r2 - r1;
-  float R0 = r1 + slope * (r.origin.y + 0.5);
+  // Y-slab in homogeneous coords: caps at Y + 0.5*W = 0 and Y - 0.5*W = 0
+  float y_plus_o = P0.y + 0.5 * P0.w;
+  float y_plus_d = D.y + 0.5 * D.w;
+  float y_minus_o = P0.y - 0.5 * P0.w;
+  float y_minus_d = D.y - 0.5 * D.w;
 
-  // --- Infinite tube intersection (2D circle/cone in XZ) ---
-  float a = r.dir.x * r.dir.x + r.dir.z * r.dir.z - slope * slope * r.dir.y * r.dir.y;
-  float bh = r.origin.x * r.dir.x + r.origin.z * r.dir.z - R0 * slope * r.dir.y;
-  float c = r.origin.x * r.origin.x + r.origin.z * r.origin.z - R0 * R0;
+  // When the ray is nearly parallel to a cap plane, y_plus_d or y_minus_d
+  // is tiny due to cancellation (D.y ≈ -0.5*D.w or D.y ≈ 0.5*D.w).
+  // Division by this near-zero value produces a t with massive FP error,
+  // corrupting slab clipping. Use a relative threshold to detect this.
+  float t_bottom, t_top;
+  float yp_scale = max(abs(D.y), 0.5 * abs(D.w));
+  float ym_scale = yp_scale; // same terms, different sign
+  if (abs(y_plus_d) > 1e-6 * yp_scale) t_bottom = -y_plus_o / y_plus_d;
+  else t_bottom = (y_plus_o < 0.0) ? -(1.0 / 0.0) : (1.0 / 0.0);
+  if (abs(y_minus_d) > 1e-6 * ym_scale) t_top = -y_minus_o / y_minus_d;
+  else t_top = (y_minus_o > 0.0) ? -(1.0 / 0.0) : (1.0 / 0.0);
 
-  // --- Y-slab clamp: intersect y = -0.5 and y = 0.5 planes ---
-  float ty_enter, ty_exit;
-  if (abs(r.dir.y) > 1e-30) {
-    float iy = 1.0 / r.dir.y;
-    ty_enter = (-0.5 - r.origin.y) * iy;
-    ty_exit = (0.5 - r.origin.y) * iy;
-    if (ty_enter > ty_exit) {
-      float tmp = ty_enter;
-      ty_enter = ty_exit;
-      ty_exit = tmp;
-    }
-  } else {
-    // Ray parallel to caps — either fully inside or outside slab
-    if (r.origin.y < -0.5 || r.origin.y > 0.5) return NO_HIT_SPAN;
-    ty_enter = -(1.0 / 0.0);
-    ty_exit = (1.0 / 0.0);
-  }
+  float ty_enter = min(t_bottom, t_top);
+  float ty_exit = max(t_bottom, t_top);
+
+  // Check if slab is valid
+  if (ty_enter > ty_exit) return NO_HIT_SPAN;
 
   float disc = bh * bh - a * c;
 
   if (abs(a) <= 1e-30) {
-    // Ray parallel to cone surface — inside only if origin is inside cone
     if (c >= 0.0) return NO_HIT_SPAN;
-    return cylinder_cap_check(r, ty_enter, ty_exit, ty_enter, ty_exit, r1, r2);
+    return cylinder_cap_check_h(P0, D, ty_enter, ty_exit, ty_enter, ty_exit);
   }
 
+  float disc_eps = 1e-5 * (bh * bh + abs(a * c));
+
   if (a > 0.0) {
-    // Standard case: ray inside cone between roots [t0, t1]
-    if (disc < 0.0) return NO_HIT_SPAN;
+    if (disc < -disc_eps) return NO_HIT_SPAN;
     float sq = sqrt(max(disc, 0.0));
     float t0 = (-bh - sq) / a;
     float t1 = (-bh + sq) / a;
-
     float te = max(t0, ty_enter);
     float tx = min(t1, ty_exit);
-    return cylinder_cap_check(r, te, tx, ty_enter, ty_exit, r1, r2);
+    return cylinder_cap_check_h(P0, D, te, tx, ty_enter, ty_exit);
   }
 
-  // a < 0: ray steeper than cone slope.
-  // Inside region is the COMPLEMENT: (-inf, lo) ∪ (hi, inf)
-  if (disc < 0.0) {
-    // No roots — ray is always inside cone, return slab
-    return cylinder_cap_check(r, ty_enter, ty_exit, ty_enter, ty_exit, r1, r2);
+  // a < 0: ray steeper than cone slope
+  if (disc < -disc_eps) {
+    return cylinder_cap_check_h(P0, D, ty_enter, ty_exit, ty_enter, ty_exit);
   }
 
   float sq = sqrt(max(disc, 0.0));
@@ -365,52 +385,85 @@ vec2 intersect_cylinder(ray r, float r1, float r2) {
   float lo = min(ra, rb);
   float hi = max(ra, rb);
 
-  // First inside interval: (-inf, lo) ∩ slab
   float te1 = ty_enter;
   float tx1 = min(lo, ty_exit);
-  vec2 hit1 = cylinder_cap_check(r, te1, tx1, ty_enter, ty_exit, r1, r2);
+  vec2 hit1 = cylinder_cap_check_h(P0, D, te1, tx1, ty_enter, ty_exit);
   if (hit1 != NO_HIT_SPAN) return hit1;
 
-  // Second inside interval: (hi, inf) ∩ slab
   float te2 = max(hi, ty_enter);
   float tx2 = ty_exit;
-  return cylinder_cap_check(r, te2, tx2, ty_enter, ty_exit, r1, r2);
+  return cylinder_cap_check_h(P0, D, te2, tx2, ty_enter, ty_exit);
 }
 
 // ---- Normals and shading ----
 
-vec3 get_local_normal(uint type, vec3 p, float r1, float r2) {
+// Normal for sphere/cube in local (affine) space
+vec3 get_local_normal_affine(uint type, vec3 p) {
   if (type == PRIMITIVE_TYPE_SPHERE) return normalize(p);
   if (type == PRIMITIVE_TYPE_CUBE) {
     vec3 a = abs(p);
     float m = max(max(a.x, a.y), a.z);
     return normalize(step(vec3(m - 0.0001), a) * sign(p));
   }
-  if (type == PRIMITIVE_TYPE_CYLINDER) {
-    if (abs(p.y) > 0.499) return vec3(0.0, sign(p.y), 0.0);
-    float R = r1 + (r2 - r1) * (p.y + 0.5);
-    return normalize(vec3(p.x, -(r2 - r1) * R, p.z));
-  }
   return vec3(0, 1, 0);
 }
 
-vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal, float shadow_factor) {
+// Compute world-space normal for a cylinder/cone hit using the homogeneous gradient.
+// hit4 = P0 + t*D (homogeneous hit point), C = prim.inv_transform (projective).
+// Surface F = X^2+Z^2-W^2: grad = (2X, 0, 2Z, -2W)
+// Cap Y-0.5W=0: grad = (0, 1, 0, -0.5), cap Y+0.5W=0: grad = (0, -1, 0, -0.5)
+vec3 get_cylinder_world_normal(vec4 hit4, mat4 C) {
+  vec4 grad;
+  // Detect cap vs side using *relative* residuals of each surface equation.
+  // Without normalization, side_res is O(d^2) and cap_res is O(d), causing
+  // side hits to be misclassified as cap hits at large distances.
+  float side_scale = hit4.x * hit4.x + hit4.z * hit4.z + hit4.w * hit4.w;
+  float side_res = abs(hit4.x * hit4.x + hit4.z * hit4.z - hit4.w * hit4.w)
+      / max(side_scale, 1e-10);
+  float cap_scale = abs(hit4.y) + 0.5 * abs(hit4.w);
+  float top_res = abs(hit4.y - 0.5 * hit4.w) / max(cap_scale, 1e-10);
+  float bot_res = abs(hit4.y + 0.5 * hit4.w) / max(cap_scale, 1e-10);
+  float cap_res = min(top_res, bot_res);
+
+  if (cap_res < side_res) {
+    // On a cap — pick which one
+    if (top_res < bot_res)
+      grad = vec4(0.0, 1.0, 0.0, -0.5); // top cap
+    else
+      grad = vec4(0.0, -1.0, 0.0, -0.5); // bottom cap
+  } else {
+    grad = vec4(2.0 * hit4.x, 0.0, 2.0 * hit4.z, -2.0 * hit4.w); // side
+  }
+  // World-space normal via transpose(C) * grad, take xyz
+  return normalize((transpose(C) * grad).xyz);
+}
+
+// Compute world-space normal for any primitive at world_pos.
+vec3 get_world_normal(vec3 world_pos, Primitive prim) {
+  if (prim.type == PRIMITIVE_TYPE_CYLINDER) {
+    vec4 hit4 = prim.inv_transform * vec4(world_pos, 1.0);
+    return get_cylinder_world_normal(hit4, prim.inv_transform);
+  }
   vec3 lp = (prim.inv_transform * vec4(world_pos, 1.0)).xyz;
-  vec3 ln = get_local_normal(prim.type, lp, prim.r1, prim.r2);
-  vec3 wn = normalize(transpose(mat3(prim.inv_transform)) * ln);
+  vec3 ln = get_local_normal_affine(uint(prim.type), lp);
+  return normalize(transpose(mat3(prim.inv_transform)) * ln);
+}
+
+vec4 get_final_color(vec3 world_pos, Primitive prim, bool invert_normal, float shadow_factor, float ao_factor) {
+  vec3 wn = get_world_normal(world_pos, prim);
   if (invert_normal) wn = -wn;
 
   vec3 view = normalize(u_camera_pos - world_pos);
   mat3 e2w = mat3(u_inv_view);
   vec3 l0 = normalize(e2w * normalize(vec3(-1, +1, +1)));
-  vec3 l1 = normalize(e2w * normalize(vec3(+1, -1, -1)));
 
   vec3 mat_color = (invert_normal && prim.defaultColor == 1) ? u_default_back_color : prim.color.rgb;
 
-  float diffuse = max(0.0, dot(wn, l0)) * shadow_factor + max(0.0, dot(wn, l1));
+  float diffuse = max(0.0, dot(wn, l0)) * shadow_factor;
   vec3 half_v = normalize(l0 + view);
-  float specular = pow(max(0.0, dot(wn, half_v)), 48.0) * 0.25 * shadow_factor;
-  return vec4(clamp(mat_color * (0.2 + diffuse) + vec3(specular), 0.0, 1.0), prim.color.a);
+  float specular = pow(max(0.0, dot(wn, half_v)), 48.0) * 0.25 * mix(0.15, 1.0, shadow_factor);
+
+  return vec4(clamp(mat_color * (0.25 * ao_factor + diffuse) + vec3(specular), 0.0, 1.0), prim.color.a);
 }
 
 // ---- Interval list helpers ----
@@ -612,13 +665,18 @@ interval_list eval_product(ray r, uint cmd_start, uint cmd_count,
         advance = cmd.skip_children;
       } else if (cmd.type == CMD_TYPE_PRIMITIVE) {
         Primitive p = primitives[cmd.id];
-        ray lr;
-        lr.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
-        lr.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
         vec2 hit = NO_HIT_SPAN;
-        if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(lr);
-        else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(lr);
-        else if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(lr, p.r1, p.r2);
+        if (p.type == PRIMITIVE_TYPE_CYLINDER) {
+          vec4 P0 = p.inv_transform * vec4(r.origin, 1.0);
+          vec4 D = p.inv_transform * vec4(r.dir, 0.0);
+          hit = intersect_cylinder_h(P0, D);
+        } else {
+          ray lr;
+          lr.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
+          lr.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
+          if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(lr);
+          else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(lr);
+        }
         result = make_primitive_interval(hit, cmd.id);
         if (u_use_dup_cache == 1 && cmd.duplicate_id != 0u)
           dup_cache_store(cmd.duplicate_id, result);
@@ -711,13 +769,18 @@ shadow_il eval_product_shadow(ray r, uint cmd_start, uint cmd_count)
       advance = cmd.skip_children;
     } else if (cmd.type == CMD_TYPE_PRIMITIVE) {
       Primitive p = primitives[cmd.id];
-      ray lr;
-      lr.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
-      lr.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
       vec2 hit = NO_HIT_SPAN;
-      if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(lr);
-      else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(lr);
-      else if (p.type == PRIMITIVE_TYPE_CYLINDER) hit = intersect_cylinder(lr, p.r1, p.r2);
+      if (p.type == PRIMITIVE_TYPE_CYLINDER) {
+        vec4 P0 = p.inv_transform * vec4(r.origin, 1.0);
+        vec4 D = p.inv_transform * vec4(r.dir, 0.0);
+        hit = intersect_cylinder_h(P0, D);
+      } else {
+        ray lr;
+        lr.origin = (p.inv_transform * vec4(r.origin, 1.0)).xyz;
+        lr.dir = (p.inv_transform * vec4(r.dir, 0.0)).xyz;
+        if (p.type == PRIMITIVE_TYPE_SPHERE) hit = intersect_unit_sphere(lr);
+        else if (p.type == PRIMITIVE_TYPE_CUBE) hit = intersect_box_AABB(lr);
+      }
       result = make_shadow_interval(hit);
       has_result = true;
     } else {
@@ -762,10 +825,8 @@ shadow_il eval_product_shadow(ray r, uint cmd_start, uint cmd_count)
   return (res_sp > 0) ? res_stack[0] : empty_il;
 }
 
-// ---- Outer DNF traversal: BVH over products ----
-// Internal nodes are spatial groupings (UNION BOUNDING BOXES);
-// leaf nodes are individual products.
-// best_t tracks the closest opaque front-face hit; used to cull BVH nodes with t_near > best_t.
+// ---- Outer DNF traversal: BVH over products (t-nearest-first) ----
+// Stack-based traversal visiting the nearer child first for better best_t pruning.
 interval_list csg_traverse(ray r,
   inout uint s_bounds, inout uint s_nodes, inout uint s_leaves)
 {
@@ -773,47 +834,39 @@ interval_list csg_traverse(ray r,
   result.count = 0;
   float best_t = 1e30;
 
-  // clear cache
   dup_cache_clear();
-
-  uint bvh_stack[MAX_BVH_STACK];
-  int sp = 0;
 
   uint n = uint(product_bvh.length());
   if (n == 0u) return result;
 
-  // Check root bounds before entering loop
-  ProductBVHNode root = product_bvh[0];
-  if (root.bounds_skip == 1u) return result;
-  if (u_use_bounds == 1) {
-    float t_near;
-    if (!bounds_hit_tnear(r.origin, r.dir, root.bounds_type, root.bounds_inv, t_near)) {
-      s_bounds++;
-      return result;
-    }
-  }
-  bvh_stack[sp++] = 0u;
+  // Stack of BVH node indices to visit
+  uint bvh_stack[MAX_BVH_STACK];
+  int sp = 0;
+  bvh_stack[sp++] = 0u; // push root
 
   while (sp > 0) {
-    uint i = bvh_stack[--sp];
+    uint i = bvh_stack[--sp]; // pop
     if (i >= n) continue;
 
     ProductBVHNode node = product_bvh[i];
 
     if (node.bounds_skip == 1u) continue;
 
-    // Re-check against best_t, may have tightened since this node was pushed before
-    if (u_use_bounds == 1 && u_use_tbest == 1) {
+    // Bounds check
+    if (u_use_bounds == 1) {
       float t_near;
-      if (!bounds_hit_tnear(r.origin, r.dir, node.bounds_type, node.bounds_inv, t_near)
-          || t_near > best_t) {
+      bool hit = bounds_hit_tnear(r.origin, r.dir, node.bounds_type, node.bounds_inv, t_near);
+      if (!hit || (u_use_tbest == 1 && t_near > best_t)) {
+        s_nodes++;
         s_bounds++;
         continue;
       }
     }
 
     if (node.is_leaf == 1u) {
-      interval_list prod = eval_product(r, node.cmd_start, node.cmd_count, s_bounds, s_nodes, s_leaves, best_t);
+      // Evaluate product
+      interval_list prod = eval_product(r, node.cmd_start, node.cmd_count,
+          s_bounds, s_nodes, s_leaves, best_t);
       if (u_use_tbest == 1 && prod.count > 0) {
         for (int k = 0; k < prod.count; k++) {
           float t_enter = prod.spans[k].t_enter;
@@ -827,69 +880,26 @@ interval_list csg_traverse(ray r,
       }
       result = merge_spans(result, prod, OP_TYPE_OPUNION);
     } else {
-      // Internal node: test both children, push farther first (nearer popped first in neext it)
-      uint left = i + 1u;
-      uint right = i + 1u + product_bvh[left].skip_children;
+      // Internal node: preorder — push right then left so left is visited first
+      uint left_idx = i + 1u;
+      uint right_idx = left_idx + product_bvh[left_idx].skip_children;
 
-      float t_left = 1e30, t_right = 1e30;
-      bool hit_left = false, hit_right = false;
-
-      ProductBVHNode ln = product_bvh[left];
-      ProductBVHNode rn = product_bvh[right];
-
-      if (ln.bounds_skip != 1u) {
-        if (u_use_bounds == 1)
-          hit_left = bounds_hit_tnear(r.origin, r.dir, ln.bounds_type, ln.bounds_inv, t_left);
-        else {
-          hit_left = true;
-          t_left = 0.0;
-        }
-      }
-      if (rn.bounds_skip != 1u) {
-        if (u_use_bounds == 1)
-          hit_right = bounds_hit_tnear(r.origin, r.dir, rn.bounds_type, rn.bounds_inv, t_right);
-        else {
-          hit_right = true;
-          t_right = 0.0;
-        }
-      }
-
-      if (u_use_tbest == 1) {
-        if (hit_left && t_left > best_t) {
-          hit_left = false;
-          s_bounds++;
-        }
-        if (hit_right && t_right > best_t) {
-          hit_right = false;
-          s_bounds++;
-        }
-      }
-
-      // Push farther child first so nearer is popped first
-      if (hit_left && hit_right) {
-        if (t_left <= t_right) {
-          bvh_stack[sp++] = right;
-          bvh_stack[sp++] = left;
-        } else {
-          bvh_stack[sp++] = left;
-          bvh_stack[sp++] = right;
-        }
-      } else if (hit_left) {
-        bvh_stack[sp++] = left;
-      } else if (hit_right) {
-        bvh_stack[sp++] = right;
+      if (sp + 2 <= MAX_BVH_STACK) {
+        bvh_stack[sp++] = right_idx;
+        bvh_stack[sp++] = left_idx;
       }
     }
   }
   return result;
 }
 
-bool csg_shadow_test(ray r) {
+bool csg_shadow_test_max(ray r, float max_t) {
+  uint n = uint(product_bvh.length());
+  if (n == 0u) return false;
+
   uint bvh_stack[MAX_BVH_STACK];
   int sp = 0;
   bvh_stack[sp++] = 0u;
-
-  uint n = uint(product_bvh.length());
 
   while (sp > 0) {
     uint i = bvh_stack[--sp];
@@ -901,58 +911,53 @@ bool csg_shadow_test(ray r) {
     if (u_use_bounds == 1) {
       float t_near;
       bool hit = bounds_hit_tnear(r.origin, r.dir, node.bounds_type, node.bounds_inv, t_near);
-      if (!hit) continue;
+      if (!hit || t_near > max_t) continue;
     }
 
     if (node.is_leaf == 1u) {
       shadow_il si = eval_product_shadow(r, node.cmd_start, node.cmd_count);
       for (int k = 0; k < si.count; k++) {
-        if (shadow_span_enter(si.spans[k]) > SHADOW_T_MIN) return true;
+        float t_enter = shadow_span_enter(si.spans[k]);
+        if (t_enter > SHADOW_T_MIN && t_enter < max_t) return true;
       }
     } else {
-      uint left = i + 1u;
-      uint right = i + 1u + product_bvh[left].skip_children;
+      // Preorder — push right then left so left is visited first
+      uint left_idx = i + 1u;
+      uint right_idx = left_idx + product_bvh[left_idx].skip_children;
 
-      float t_left = 1e30, t_right = 1e30;
-      bool hit_left = false, hit_right = false;
-
-      ProductBVHNode ln = product_bvh[left];
-      ProductBVHNode rn = product_bvh[right];
-
-      if (ln.bounds_skip != 1u) {
-        if (u_use_bounds == 1)
-          hit_left = bounds_hit_tnear(r.origin, r.dir, ln.bounds_type, ln.bounds_inv, t_left);
-        else {
-          hit_left = true;
-          t_left = 0.0;
-        }
-      }
-      if (rn.bounds_skip != 1u) {
-        if (u_use_bounds == 1)
-          hit_right = bounds_hit_tnear(r.origin, r.dir, rn.bounds_type, rn.bounds_inv, t_right);
-        else {
-          hit_right = true;
-          t_right = 0.0;
-        }
-      }
-
-      // Push farther child first so nearer is popped first
-      if (hit_left && hit_right) {
-        if (t_left <= t_right) {
-          bvh_stack[sp++] = right;
-          bvh_stack[sp++] = left;
-        } else {
-          bvh_stack[sp++] = left;
-          bvh_stack[sp++] = right;
-        }
-      } else if (hit_left) {
-        bvh_stack[sp++] = left;
-      } else if (hit_right) {
-        bvh_stack[sp++] = right;
+      if (sp + 2 <= MAX_BVH_STACK) {
+        bvh_stack[sp++] = right_idx;
+        bvh_stack[sp++] = left_idx;
       }
     }
   }
   return false;
+}
+
+bool csg_shadow_test(ray r) {
+  return csg_shadow_test_max(r, 1e30);
+}
+
+// ---- Hash for jitter (low-discrepancy) ----
+// Based on interleaved gradient noise (Jimenez 2014) — less structured than sin-hash
+float ign(vec2 p) {
+  return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+}
+
+// 2D Cranley-Patterson rotation using golden ratio offsets per sample
+vec2 r2_sequence(int i, float seed) {
+  const float g = 1.32471795724; // plastic constant
+  return fract(vec2(float(i) / g, float(i) / (g * g)) + seed);
+}
+
+// Cosine-weighted hemisphere sample oriented along normal
+vec3 cosine_hemisphere(vec3 n, vec2 xi) {
+  float r = sqrt(xi.x);
+  float theta = 6.2831853 * xi.y;
+  vec3 t = (abs(n.y) < 0.999) ? normalize(cross(n, vec3(0, 1, 0))) : normalize(cross(n, vec3(1, 0, 0)));
+  vec3 b = cross(n, t);
+  // Map to hemisphere: cosine-weighted via sqrt for r
+  return normalize(t * cos(theta) * r + b * sin(theta) * r + n * sqrt(1.0 - xi.x));
 }
 
 // ---- Compositing ----
@@ -976,30 +981,61 @@ vec4 composite(interval_list fl, ray r, ivec2 px) {
     float shadow_factor = 1.0;
     if (u_use_shadows == 1) {
       Primitive hp_p = primitives[span_prim_id(fl.spans[k])];
-      vec3 lp = (hp_p.inv_transform * vec4(hp, 1.0)).xyz;
-      vec3 ln = get_local_normal(hp_p.type, lp, hp_p.r1, hp_p.r2);
-      vec3 wn = normalize(transpose(mat3(hp_p.inv_transform)) * ln);
+      vec3 wn = get_world_normal(hp, hp_p);
       if (span_invert(fl.spans[k])) wn = -wn;
       vec3 l0 = normalize(mat3(u_inv_view) * normalize(vec3(-1, +1, +1)));
-      ray sr;
-      sr.origin = hp + wn * 1e-3;
-      sr.dir = l0;
-      if (csg_shadow_test(sr)) shadow_factor = 0.0;
+      vec3 shadow_origin = hp + wn * 1e-3;
+      float light_radius = 0.04;
+
+      // Simple hash per pixel+frame for random jitter
+      float h = fract(sin(dot(vec2(px) + float(u_frame_index), vec2(12.9898, 78.233))) * 43758.5453);
+
+      const int SHADOW_SAMPLES = 16;
+      int shadow_hits = 0;
+      for (int s = 0; s < SHADOW_SAMPLES; s++) {
+        // Random direction offset: jitter the light direction slightly
+        float angle = 6.2831853 * fract(h + float(s) * 0.618);
+        float radius = light_radius * fract(h + float(s) * 0.3819);
+        vec3 jitter = vec3(cos(angle), sin(angle), 0.0) * radius;
+
+        ray sr;
+        sr.origin = shadow_origin;
+        sr.dir = normalize(l0 + jitter);
+        if (csg_shadow_test(sr)) shadow_hits++;
+      }
+      shadow_factor = mix(1.0, 0.3, float(shadow_hits) / float(SHADOW_SAMPLES));
+    }
+
+    float ao_factor = 1.0;
+    if (u_use_ao == 1) {
+      Primitive hp_p = primitives[span_prim_id(fl.spans[k])];
+      vec3 wn = get_world_normal(hp, hp_p);
+      if (span_invert(fl.spans[k])) wn = -wn;
+      vec3 ao_origin = hp + wn * 1e-3;
+
+      float seed = ign(vec2(px) + float(u_frame_index) * 1.2345);
+      float ao_radius = 0.5;
+      int ao_hits = 0;
+      const int AO_SAMPLES = 8;
+      for (int s = 0; s < AO_SAMPLES; s++) {
+        vec2 xi = r2_sequence(s + 16, seed); // offset index to avoid shadow correlation
+        vec3 dir = cosine_hemisphere(wn, xi);
+        ray ao_ray;
+        ao_ray.origin = ao_origin;
+        ao_ray.dir = dir;
+        if (csg_shadow_test_max(ao_ray, ao_radius)) ao_hits++;
+      }
+      ao_factor = 1.0 - 0.6 * float(ao_hits) / float(AO_SAMPLES);
     }
 
     vec4 c = get_final_color(hp, primitives[span_prim_id(fl.spans[k])],
-        span_invert(fl.spans[k]), shadow_factor);
+        span_invert(fl.spans[k]), shadow_factor, ao_factor);
     acc += c.rgb * c.a * rem;
     rem *= (1.0 - c.a);
   }
 
   if (!depth_written) imageStore(depthOutput, px, vec4(1, 0, 0, 0));
   return vec4(acc + u_background * rem, 1.0);
-}
-
-// ---- Hash for jitter ----
-float hash(vec2 p) {
-  return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x))));
 }
 
 // ---- Main ----
@@ -1039,7 +1075,12 @@ void main() {
       interval_list spans = csg_traverse(r, inv_bounds, inv_nodes, inv_leaves);
       avg += composite(spans, r, px);
     }
-    imageStore(imgOutput, px, avg / float(u_samples));
+    vec4 color = avg / float(u_samples);
+    if ((u_use_shadows == 1 || u_use_ao == 1) && u_frame_index > 0) {
+      vec4 prev = imageLoad(imgOutput, px);
+      color = mix(color, prev, float(u_frame_index) / float(u_frame_index + 1));
+    }
+    imageStore(imgOutput, px, color);
   }
 
   atomicAdd(wg_bounds_skipped, inv_bounds);

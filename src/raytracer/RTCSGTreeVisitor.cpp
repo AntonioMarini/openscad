@@ -22,7 +22,6 @@ static OperationType mapOperator(OpenSCADOperator op)
   }
 }
 
-// Splits the children list in half recursevely without any spatial grouping logic.
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeNaive(
   std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op)
 {
@@ -88,8 +87,6 @@ std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
   return std::make_shared<RTCSGNode>(op, binarizeKD(left, op), binarizeKD(right, op));
 }
 
-// ---- Entry point ----
-
 static std::pair<int, int> computeTreeStats(const std::shared_ptr<RTCSGNode>& node)
 {
   if (!node) return {0, 0};
@@ -116,7 +113,6 @@ void RTCSGTreeVisitor::addToParent(const State& state, const AbstractNode& node)
   }
 }
 
-// Binarize children: uses naive balanced split for commutative ops
 void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, OperationType op)
 {
   const auto& vc = this->visitedchildren[node.index()];
@@ -147,11 +143,18 @@ void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, O
 
   if (op == OperationType::DIFFERENCE) {
     // Difference is NOT commutative: first child is the base, rest are subtracted.
-    auto result = validChildren[0];
-    for (size_t i = 1; i < validChildren.size(); i++) {
-      result = std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, result, validChildren[i]);
+    // A - B - C - D  ≡  A - (B ∪ C ∪ D)  — balance the subtractands as a union tree.
+    auto base = validChildren[0];
+    if (validChildren.size() == 2) {
+      this->stored_term[node.index()] =
+        std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, base, validChildren[1]);
+    } else {
+      std::vector<std::shared_ptr<RTCSGNode>> subs(validChildren.begin() + 1, validChildren.end());
+      auto subtractand = useKDBinarization ? binarizeKD(subs, OperationType::UNION)
+                                           : binarizeNaive(subs, OperationType::UNION);
+      this->stored_term[node.index()] =
+        std::make_shared<RTCSGNode>(OperationType::DIFFERENCE, base, subtractand);
     }
-    this->stored_term[node.index()] = result;
   } else {
     // Union and Intersection are commutative -> balanced binarization (TODO: make binarization method
     // dynamic)
@@ -160,7 +163,6 @@ void RTCSGTreeVisitor::applyToChildren(State& state, const AbstractNode& node, O
   }
 }
 
-// ---- AbstractNode (fallback): treat as union of children ----
 Response RTCSGTreeVisitor::visit(State& state, const AbstractNode& node)
 {
   if (state.isPostfix()) {
@@ -289,6 +291,11 @@ void RTCSGTreeVisitor::recomputeStats(const std::shared_ptr<RTCSGNode>& root)
   auto [count, depth] = computeTreeStats(root);
   nodeCount = count;
   treeDepth = depth;
+}
+
+std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::balanceDifferenceChains(std::shared_ptr<RTCSGNode> node)
+{
+  return node;
 }
 
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::distributeOperation(std::shared_ptr<RTCSGNode> node)

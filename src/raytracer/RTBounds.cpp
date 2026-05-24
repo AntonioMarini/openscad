@@ -40,6 +40,25 @@ bool RTBounds::containsPoint(const Eigen::Vector3f& point) const
   return std::abs(local.x()) <= 1.01f && std::abs(local.y()) <= 1.01f && std::abs(local.z()) <= 1.01f;
 }
 
+RTBounds RTBounds::shifted(const Eigen::Vector3f& offset) const
+{
+  RTBounds result = *this;
+  if (skip) return result;
+  if (bounds_type == 0) {
+    // AABB: shift min/max
+    result.inv_transform.col(0).head<3>() += offset;
+    result.inv_transform.col(1).head<3>() += offset;
+  } else {
+    // OBB: inv_transform maps world→local. Shifting world by 'offset' means
+    // the new inv maps (p+offset) → local, i.e. inv_new * (p,1) = inv * (p - offset, 1).
+    // So we apply a pre-translation: inv_new = inv * T(-offset).
+    Eigen::Matrix4f T = Eigen::Matrix4f::Identity();
+    T.col(3).head<3>() = -offset;
+    result.inv_transform = inv_transform * T;
+  }
+  return result;
+}
+
 std::vector<Eigen::Vector3f> RTBounds::getCorners() const
 {
   if (bounds_type == 0) {
@@ -189,6 +208,21 @@ RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& le
 {
   auto leftCorners = leftBounds.getCorners();
   auto rightCorners = rightBounds.getCorners();
+
+  // Shift all corners near the origin for numerical stability.
+  // At large world coordinates (e.g. [123, 210, 0]), float32 tri-tri
+  // intersection and containment tests lose too much precision.
+  Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+  for (const auto& c : leftCorners) centroid += c;
+  for (const auto& c : rightCorners) centroid += c;
+  centroid /= static_cast<float>(leftCorners.size() + rightCorners.size());
+  for (auto& c : leftCorners) c -= centroid;
+  for (auto& c : rightCorners) c -= centroid;
+
+  // Rebuild shifted bounds for containsPoint tests
+  RTBounds leftShifted = leftBounds.shifted(-centroid);
+  RTBounds rightShifted = rightBounds.shifted(-centroid);
+
   RTBounds result;
   result.skip = 0;
   std::vector<Eigen::Vector3f> selectedCorners;
@@ -217,10 +251,10 @@ RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& le
       return result;
     }
     for (const auto& c : leftCorners) {
-      if (rightBounds.containsPoint(c)) selectedCorners.push_back(c);
+      if (rightShifted.containsPoint(c)) selectedCorners.push_back(c);
     }
     for (const auto& c : rightCorners) {
-      if (leftBounds.containsPoint(c)) selectedCorners.push_back(c);
+      if (leftShifted.containsPoint(c)) selectedCorners.push_back(c);
     }
 
     auto leftTris = triangulateBoundsCorners(leftCorners);
@@ -251,10 +285,48 @@ RTBounds RTBounds::buildOperationBounds(OperationType optype, const RTBounds& le
       result.skip = 1;
       return result;
     }
-    selectedCorners = leftCorners;
+    if (rightBounds.skip) {
+      // No right volume — difference is just left
+      selectedCorners = leftCorners;
+      break;
+    }
+    // Left corners NOT inside right (surviving corners of A)
+    for (const auto& c : leftCorners) {
+      if (!rightShifted.containsPoint(c)) selectedCorners.push_back(c);
+    }
+    // Right corners inside left (subtraction boundary within A)
+    for (const auto& c : rightCorners) {
+      if (leftShifted.containsPoint(c)) selectedCorners.push_back(c);
+    }
+    // Edge-edge intersection points (where B's surface cuts A's surface)
+    auto leftTris = triangulateBoundsCorners(leftCorners);
+    auto rightTris = triangulateBoundsCorners(rightCorners);
+    for (auto& tA : leftTris) {
+      for (auto& tB : rightTris) {
+        int coplanar = 0;
+        float isectpt1[3], isectpt2[3];
+        int hit =
+          tri_tri_intersect_with_isectline(tA.v0.data(), tA.v1.data(), tA.v2.data(), tB.v0.data(),
+                                           tB.v1.data(), tB.v2.data(), &coplanar, isectpt1, isectpt2);
+        if (hit && !coplanar) {
+          selectedCorners.emplace_back(isectpt1[0], isectpt1[1], isectpt1[2]);
+          selectedCorners.emplace_back(isectpt2[0], isectpt2[1], isectpt2[2]);
+        }
+      }
+    }
+    if (selectedCorners.empty()) {
+      // Heuristic found no surviving corners, but A \ B ⊆ A always.
+      // The subtractand's bounds may envelope A without its geometry
+      // filling the volume (e.g. union of cross-holes in a menger sponge).
+      // Fall back to left bounds as a safe over-approximation.
+      selectedCorners = leftCorners;
+    }
     break;
   }
   }
+
+  // Shift corners back to world space
+  for (auto& c : selectedCorners) c += centroid;
 
   // center ~ avg
   Eigen::Vector3f sumPoints = Eigen::Vector3f::Zero();

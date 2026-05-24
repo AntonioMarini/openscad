@@ -6,9 +6,6 @@
 #define OPENSCAD_RTCSGNODE_H
 
 #include <memory>
-#include <algorithm>
-#include <iostream>
-#include <string>
 
 #include "Primitive.h"
 #include "Operation.h"
@@ -42,46 +39,6 @@ struct RTCSGNode {
   {
   }
 
-  void set_transform(const Eigen::Vector3f& pos, const Eigen::Vector3f& scale)
-  {
-    transform = Eigen::Matrix4f::Identity();
-    transform(0, 0) = scale.x();
-    transform(1, 1) = scale.y();
-    transform(2, 2) = scale.z();
-    transform(0, 3) = pos.x();
-    transform(1, 3) = pos.y();
-    transform(2, 3) = pos.z();
-  }
 };
-
-inline void printRTCSGTree(const std::shared_ptr<RTCSGNode>& node, int depth = 0)
-{
-  if (!node) return;
-
-  std::string indent(depth * 2, ' ');
-
-  if (node->is_leaf()) {
-    std::string typeName;
-    switch (node->primitive) {
-    case PrimitiveType::SPHERE:   typeName = "Sphere"; break;
-    case PrimitiveType::CUBE:     typeName = "Cube"; break;
-    case PrimitiveType::CYLINDER: typeName = "Cylinder"; break;
-    default:                      typeName = "Unknown"; break;
-    }
-    std::cout << indent << typeName << " color=(" << node->color.x() << ", " << node->color.y() << ", "
-              << node->color.z() << ", " << node->color.w() << ")" << std::endl;
-  } else {
-    std::string opName;
-    switch (node->op) {
-    case OperationType::UNION:        opName = "Union"; break;
-    case OperationType::INTERSECTION: opName = "Intersection"; break;
-    case OperationType::DIFFERENCE:   opName = "Difference"; break;
-    default:                          opName = "None"; break;
-    }
-    std::cout << indent << opName << std::endl;
-    printRTCSGTree(node->left, depth + 1);
-    printRTCSGTree(node->right, depth + 1);
-  }
-}
 
 #endif  // OPENSCAD_RTCSGNODE_H

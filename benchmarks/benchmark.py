@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-import argparse, csv, json, os, re, shutil, subprocess, sys, pathlib, datetime
+import argparse, csv, json, os, re, shutil, statistics, subprocess, sys, pathlib, datetime
 
 FIXED_CONFIGS = [
-   #{"label": "Baseline",            "binarization": 0, "obb": 0, "tbest": 0, "product_bvh": 0, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
-    {"label": "Bounding Box Culling", "binarization": 0, "obb": 1, "tbest": 0, "product_bvh": 0, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
-    {"label": "t culling",           "binarization": 0, "obb": 1, "tbest": 1, "product_bvh": 0, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
-    {"label": "KD tree",             "binarization": 1, "obb": 1, "tbest": 1, "product_bvh": 1, "cache": 0, "distribution": 1, "shadows": 1, "dnf": 1},
+
+    #  {"label": "DNF", "binarization": 0, "obb": 0, "tbest": 0, "product_bvh": 0, "cache": 0, "distribution": 0, "shadows": 0, "dnf": 0},
+            
+    #{"label": "Baseline", "binarization": 1, "obb": 0, "tbest": 0, "product_bvh": 1, "cache": 0, "distribution": 1, "shadows": 0, "dnf": 1},
+
+#    {"label": "No DNF", "binarization": 1, "obb": 1, "tbest": 1, "product_bvh": 1, "cache": 1, "distribution": 1, "shadows": 0, "dnf": 0},
+ #   {"label": "DNF", "binarization": 1, "obb": 1, "tbest": 1, "product_bvh": 1, "cache": 1, "distribution": 1, "shadows": 0, "dnf": 1},
+
+    {"label": "Naive", "binarization": 0, "obb": 1, "tbest": 1, "product_bvh": 0, "cache": 1, "distribution": 1, "shadows": 0, "dnf": 1},
+    {"label": "KD-tree", "binarization": 1, "obb": 1, "tbest": 1, "product_bvh": 1, "cache": 1, "distribution": 1, "shadows": 0, "dnf": 1},
+
 ]
 
 BENCH_RE = re.compile(
@@ -87,14 +94,15 @@ def run_model(model_path, cfg, args, runs_dir, ts, skip_screenshot=False):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
     )
     node_count = tree_depth = render_w = render_h = None
-    nodes_visited = leaves_visited = None
+    bench_nodes_visited = bench_leaves_visited = bench_total_frames = None
     for line in proc.stdout:
         print(line, end="", flush=True)
         m = BENCH_RE.search(line)
         if m:
+            bench_total_frames = int(m[1])
             node_count, tree_depth = int(m[5]), int(m[6])
             render_w, render_h = int(m[7]), int(m[8])
-            nodes_visited, leaves_visited = int(m[9]), int(m[10])
+            bench_nodes_visited, bench_leaves_visited = int(m[9]), int(m[10])
     proc.wait()
 
     frames = []
@@ -107,12 +115,35 @@ def run_model(model_path, cfg, args, runs_dir, ts, skip_screenshot=False):
         for i, row in enumerate(frames):
             row["step"] = str(i + 1)
 
-    # Recompute statistics from the kept frames
-    fps_values = [float(r["fps"]) for r in frames] if frames else []
-    avg_fps = sum(fps_values) / len(fps_values) if fps_values else None
-    min_fps = min(fps_values) if fps_values else None
-    max_fps = max(fps_values) if fps_values else None
+    # Recompute statistics from the kept (non-warmup) frames only
+    # Use frame times (ms) as the base metric; derive FPS from mean frame time
+    # (arithmetic mean of FPS is biased — harmonic mean via avg_ms is correct)
+    ms_values = [float(r["frame_ms"]) for r in frames] if frames else []
+    if ms_values:
+        avg_ms = sum(ms_values) / len(ms_values)
+        avg_fps = 1000.0 / avg_ms if avg_ms > 0 else None
+        min_fps = 1000.0 / max(ms_values)  # slowest frame → min FPS
+        max_fps = 1000.0 / min(ms_values)  # fastest frame → max FPS
+        std_ms = statistics.stdev(ms_values) if len(ms_values) > 1 else 0.0
+        cv = (std_ms / avg_ms * 100) if avg_ms > 0 else 0.0
+        median_ms = statistics.median(ms_values)
+        median_fps = 1000.0 / median_ms if median_ms > 0 else None
+    else:
+        avg_fps = min_fps = max_fps = median_fps = None
+        std_ms = cv = 0.0
     total_frames = len(frames)
+    if cv > 10:
+        print(f"  ⚠ CV={cv:.1f}% — high variance, results may be unreliable")
+
+    # Prefer per-frame GPU stats from CSV (warmup-excluded); fall back to [BENCH] totals
+    has_per_frame_stats = frames and "nodes_visited" in frames[0]
+    if has_per_frame_stats:
+        nodes_visited = sum(int(r["nodes_visited"]) for r in frames)
+        leaves_visited = sum(int(r["leaves_visited"]) for r in frames)
+    else:
+        nodes_visited = bench_nodes_visited
+        leaves_visited = bench_leaves_visited
+        total_frames = bench_total_frames
 
     screenshot = pathlib.Path(out) / "frame.png"
 
@@ -127,7 +158,8 @@ def run_model(model_path, cfg, args, runs_dir, ts, skip_screenshot=False):
 
     return (proc.returncode, avg_fps, min_fps, max_fps,
             total_frames, node_count, tree_depth, render_w, render_h,
-            nodes_visited, leaves_visited, frames, screenshot)
+            nodes_visited, leaves_visited, frames, screenshot,
+            std_ms, cv, median_fps)
 
 
 
@@ -225,6 +257,21 @@ def write_scene_overview_latex(out_dir, all_model_results):
     print(f"  Scene overview LaTeX: {path}")
 
 
+def write_final_csv(out_dir, all_model_results):
+    path = pathlib.Path(out_dir) / "summary.csv"
+    with open(path, "w") as f:
+        f.write("Model,Config,Nodes,Depth,FPS avg,Std (ms),CV%,Median FPS\n")
+        for i, (stem, results) in enumerate(all_model_results):
+            if i > 0:
+                f.write("\n")
+            for cfg_label, _frames, stats, avg, _mn, _mx in results:
+                med = stats.get('median_fps')
+                med_str = f"{med:.2f}" if med is not None else "N/A"
+                f.write(f"{stem},{cfg_label},{stats['node_count']},{stats['tree_depth']},"
+                        f"{avg:.2f},{stats['std_ms']:.2f},{stats['cv_pct']:.1f},{med_str}\n")
+    print(f"  Final CSV: {path}")
+
+
 def write_model_csv(out_dir, results):
     path = out_dir / "results.csv"
     with open(path, "w") as f:
@@ -294,7 +341,7 @@ def main():
         description="Benchmark OpenSCAD GPU raytracer — outputs one Overleaf-ready folder per model.",
     )
     p.add_argument("models", nargs="+", help=".scad file(s) or folder(s)")
-    p.add_argument("--steps",     type=int,   default=6)
+    p.add_argument("--steps",     type=int,   default=72)
     p.add_argument("--warmup",    type=int,   default=2,
                    help="Frames to render but discard before recording (default: 2)")
     p.add_argument("--width",     type=int,   default=1920, help="Viewport width in pixels")
@@ -335,7 +382,8 @@ def main():
 
         for cfg_idx, cfg in enumerate(FIXED_CONFIGS):
             rc, avg, mn, mx, nframes, nodes, depth, render_w, render_h, \
-                nodes_visited, leaves_visited, frames, shot = \
+                nodes_visited, leaves_visited, frames, shot, \
+                std_ms, cv_pct, med_fps = \
                 run_model(model, cfg, args, runs_dir, ts, skip_screenshot=cfg_idx > 0)
 
             if rc != 0 or avg is None:
@@ -346,7 +394,8 @@ def main():
                 "node_count": nodes, "tree_depth": depth,
                 "render_w": render_w, "render_h": render_h,
                 "nodes_visited": nodes_visited, "leaves_visited": leaves_visited,
-                "total_frames": args.steps + args.warmup,
+                "total_frames": nframes,
+                "std_ms": std_ms, "cv_pct": cv_pct, "median_fps": med_fps,
             }
             results.append((cfg["label"], frames, stats, avg, mn, mx))
 
@@ -366,6 +415,7 @@ def main():
     if all_model_results:
         write_summary_latex(args.output, all_model_results, gpu)
         write_scene_overview_latex(args.output, all_model_results)
+        write_final_csv(args.output, all_model_results)
 
     succeeded = total - len(failed)
     print(f"\nDone. {succeeded}/{total} succeeded.")

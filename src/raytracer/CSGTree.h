@@ -7,6 +7,7 @@
 #include <cfloat>
 #include <iostream>
 #include <map>
+#include <string>
 
 #include "RTCSGNode.h"
 #include "RTBounds.h"
@@ -58,31 +59,36 @@ public:
     countDNFNodesRec(node->right);
   }
 
-  // helper function to print out matrix data to stdout for debugging
-  void print_matrix(const Eigen::Matrix4f& mat)
+  // Pretty-print the tree with box-drawing characters
+  static void print_tree(const std::shared_ptr<RTCSGNode>& node, const std::string& prefix = "",
+                         bool is_left = true, bool is_root = true)
   {
-    for (int i = 0; i < 4; ++i) {
-      for (int j = 0; j < 4; ++j) {
-        std::cout << mat(i, j) << " ";
-      }
-      std::cout << std::endl;
+    if (!node) return;
+
+    std::string connector = is_root ? "" : (is_left ? "├── " : "└── ");
+    std::string child_prefix = is_root ? "" : (is_left ? "│   " : "    ");
+
+    std::cout << prefix << connector;
+
+    if (node->is_leaf()) {
+      std::cout << printPrimitive(node->primitive) << " col=(" << node->color.x() << ", "
+                << node->color.y() << ", " << node->color.z() << ")\n";
+    } else {
+      const char *op_str = (node->op == OperationType::UNION)          ? "UNION"
+                           : (node->op == OperationType::INTERSECTION) ? "INTERSECT"
+                           : (node->op == OperationType::DIFFERENCE)   ? "DIFFERENCE"
+                                                                       : "???";
+      std::cout << op_str << "\n";
+      print_tree(node->left, prefix + child_prefix, true, false);
+      print_tree(node->right, prefix + child_prefix, false, false);
     }
   }
 
-  // debug function to print the tree
-  void print_tree(const std::shared_ptr<RTCSGNode>& node, int depth = 0)
+  static void print_tree_labeled(const std::string& label, const std::shared_ptr<RTCSGNode>& node)
   {
-    if (!node) return;
-    for (int i = 0; i < depth; ++i) std::cout << "  ";
-    if (node->is_leaf()) {
-      std::cout << "Primitive: " << static_cast<int>(node->primitive) << " "
-                << printPrimitive(node->primitive) << ", Color: (" << node->color.x() << ", "
-                << node->color.y() << ", " << node->color.z() << ")\n";
-    } else {
-      std::cout << "Operation: " << static_cast<int>(node->op) << "\n";
-      print_tree(node->left, depth + 1);
-      print_tree(node->right, depth + 1);
-    }
+    std::cout << "\n===== [RT] " << label << " =====\n";
+    print_tree(node);
+    std::cout << "===== end =====\n" << std::endl;
   }
 
   // --- DNF (Goldfeather) flatten ---

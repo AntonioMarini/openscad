@@ -26,6 +26,9 @@ struct alignas(16) RTBounds {
     bool containsPoint(const Eigen::Vector3f&) const;
     std::vector<Eigen::Vector3f> getCorners() const;
 
+    // Return a copy with all geometry shifted by 'offset' (for numerical stability).
+    RTBounds shifted(const Eigen::Vector3f& offset) const;
+
     static RTBounds buildPrimitiveBounds(const RTCSGNode& node);
     static RTBounds buildPrimitiveAABB(const RTCSGNode& node);
     static RTBounds buildOperationBounds(OperationType optype, const RTBounds& left,

@@ -16,3 +16,6 @@
 [submodule "Clipper2"]
 	path = submodules/Clipper2
 	url = https://github.com/AngusJohnson/Clipper2.git
+[submodule "submodules/thesis"]
+	path = submodules/thesis
+	url = git@github.com:AntonioMarini/bachelor-thesis-csg-raytacer.git
