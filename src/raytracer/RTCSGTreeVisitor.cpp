@@ -62,23 +62,27 @@ Eigen::Vector3f RTCSGTreeVisitor::getCentroid(const std::shared_ptr<RTCSGNode>& 
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::binarizeKD(
   std::vector<std::shared_ptr<RTCSGNode>>& children, OperationType op)
 {
+  if (children.empty()) return nullptr;
   if (children.size() == 1) return children[0];
   if (children.size() == 2) return std::make_shared<RTCSGNode>(op, children[0], children[1]);
 
+  // Compute all centroids once (getCentroid traverses the full subtree — don't call it inside sort)
+  std::vector<std::pair<Eigen::Vector3f, std::shared_ptr<RTCSGNode>>> keyed(children.size());
   Eigen::Vector3f cmin(FLT_MAX, FLT_MAX, FLT_MAX);
   Eigen::Vector3f cmax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-  for (const auto& child : children) {
-    Eigen::Vector3f c = getCentroid(child);
-    cmin = cmin.cwiseMin(c);
-    cmax = cmax.cwiseMax(c);
+  for (size_t i = 0; i < children.size(); i++) {
+    keyed[i] = {getCentroid(children[i]), children[i]};
+    cmin = cmin.cwiseMin(keyed[i].first);
+    cmax = cmax.cwiseMax(keyed[i].first);
   }
   Eigen::Vector3f extent = cmax - cmin;
   int axis = 0;
   if (extent[1] > extent[axis]) axis = 1;
   if (extent[2] > extent[axis]) axis = 2;
 
-  std::sort(children.begin(), children.end(),
-            [&](const auto& a, const auto& b) { return getCentroid(a)[axis] < getCentroid(b)[axis]; });
+  std::sort(keyed.begin(), keyed.end(),
+            [axis](const auto& a, const auto& b) { return a.first[axis] < b.first[axis]; });
+  for (size_t i = 0; i < children.size(); i++) children[i] = std::move(keyed[i].second);
 
   size_t mid = children.size() / 2;
   std::vector<std::shared_ptr<RTCSGNode>> left(children.begin(), children.begin() + mid);
@@ -295,6 +299,7 @@ void RTCSGTreeVisitor::recomputeStats(const std::shared_ptr<RTCSGNode>& root)
 
 std::shared_ptr<RTCSGNode> RTCSGTreeVisitor::balanceDifferenceChains(std::shared_ptr<RTCSGNode> node)
 {
+  // TODO: balance long difference chains (A-B-C-D-...) for better BVH culling
   return node;
 }
 

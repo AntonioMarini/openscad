@@ -24,9 +24,6 @@ struct RTCSGNode {
   float r1 = 1.0f;
   float r2 = 1.0f;
 
-  Eigen::Vector3f min_bound = Eigen::Vector3f::Zero();
-  Eigen::Vector3f max_bound = Eigen::Vector3f::Zero();
-
   bool is_leaf() const { return (left == nullptr && right == nullptr); }
 
   RTCSGNode(OperationType type, std::shared_ptr<RTCSGNode> l, std::shared_ptr<RTCSGNode> r)

@@ -19,11 +19,10 @@ inline Eigen::Matrix4f computeConeToUnitCylinderMatrix(float r1, float r2)
   r1 = std::max(r1, eps);
   r2 = std::max(r2, eps);
 
-  float alpha = (r1 + r2) * 0.5f;
-  float beta = r2 - r1;
   float inv_r1 = 1.0f / r1;
-  float c = (r1 + r2) / (2.0f * r1);
-  float d = (r2 - r1) / (4.0f * r1);
+  float beta = r2 - r1;
+  float c = (r1 + r2) / (2.0f * r1);  // = (r1+r2)*0.5 * inv_r1
+  float d = beta / (4.0f * r1);        // = beta * inv_r1 / 4
 
   Eigen::Matrix4f M = Eigen::Matrix4f::Zero();
   M(0, 0) = inv_r1;
@@ -31,7 +30,7 @@ inline Eigen::Matrix4f computeConeToUnitCylinderMatrix(float r1, float r2)
   M(1, 3) = d;
   M(2, 2) = inv_r1;
   M(3, 1) = beta * inv_r1;
-  M(3, 3) = alpha * inv_r1;
+  M(3, 3) = c;
 
   return M;
 }

@@ -6,7 +6,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <iostream>
-#include <map>
+#include <unordered_map>
 #include <string>
 
 #include "RTCSGNode.h"
@@ -21,27 +21,12 @@ class CSGTree
 public:
   std::shared_ptr<RTCSGNode> root;
 
-  CSGTree(std::shared_ptr<RTCSGNode> root_node) : root(root_node) {};
+  CSGTree(std::shared_ptr<RTCSGNode> root_node) : root(std::move(root_node)) {};
 
-  std::map<RTCSGNode *, unsigned int> node_count;
-  std::map<RTCSGNode *, unsigned int> node_duplicate_id;
-  std::map<RTCSGNode *, unsigned int> node_first_cmd_id;
-  std::map<RTCSGNode *, unsigned int> node_first_prim_id;
-  unsigned int next_duplicate_id = 1;
-
-  // DNF caching state
-  std::map<RTCSGNode *, unsigned int> dnf_node_count;
-  std::map<RTCSGNode *, unsigned int> dnf_node_duplicate_id;
+  // DNF caching state (populated by countDNFNodes, consumed by flatten_product)
+  std::unordered_map<RTCSGNode *, unsigned int> dnf_node_count;
+  std::unordered_map<RTCSGNode *, unsigned int> dnf_node_duplicate_id;
   unsigned int dnf_next_duplicate_id = 1;
-
-  void countNodes(std::shared_ptr<RTCSGNode> node)
-  {
-    if (!node) return;
-    node_count[node.get()]++;
-    if (node_count[node.get()] > 1) return;
-    countNodes(node->left);
-    countNodes(node->right);
-  }
 
   void countDNFNodes(const std::vector<std::shared_ptr<RTCSGNode>>& products)
   {
@@ -111,9 +96,9 @@ public:
   // prim_cache is shared across all products to avoid duplicate Primitive entries.
   uint32_t flatten_product(const std::shared_ptr<RTCSGNode>& node, std::vector<Primitive>& primitives,
                            std::vector<Operation>& operations, std::vector<ProductCommand>& commands,
-                           std::map<RTCSGNode *, uint32_t>& prim_cache, RTBounds& out_bounds)
+                           std::unordered_map<RTCSGNode *, uint32_t>& prim_cache, RTBounds& out_bounds)
   {
-    auto cmd_id = (uint32_t)commands.size();
+    auto cmd_id = static_cast<uint32_t>(commands.size());
     ProductCommand cmd{};
 
     // Determine duplicate_id for shared subtrees
@@ -135,7 +120,7 @@ public:
       if (it != prim_cache.end()) {
         prim_id = it->second;
       } else {
-        prim_id = (uint32_t)primitives.size();
+        prim_id = static_cast<uint32_t>(primitives.size());
         primitives.emplace_back(node->primitive, node->color, node->transform, node->r1, node->r2,
                                 node->isDefaultColor);
         prim_cache[node.get()] = prim_id;
@@ -150,7 +135,7 @@ public:
       cmd.bounds_inv = out_bounds.skip ? Eigen::Matrix4f::Zero() : out_bounds.inv_transform;
       commands.push_back(cmd);
     } else {
-      auto op_id = (uint32_t)operations.size();
+      auto op_id = static_cast<uint32_t>(operations.size());
       operations.emplace_back(node->op, 0u, 0u);
 
       cmd.type = 1;  // OPERATION
@@ -167,7 +152,7 @@ public:
 
       operations[op_id].left_id = left_id;
       operations[op_id].right_id = right_id;
-      commands[cmd_id].skip_children = (uint32_t)commands.size() - cmd_id;
+      commands[cmd_id].skip_children = static_cast<uint32_t>(commands.size() - cmd_id);
       out_bounds = RTBounds::buildOperationBounds(node->op, left_bounds, right_bounds);
       commands[cmd_id].bounds_skip = out_bounds.skip ? 1u : 0u;
       commands[cmd_id].bounds_type = out_bounds.skip ? 1u : out_bounds.bounds_type;
@@ -201,7 +186,7 @@ public:
   static RTBounds buildProductBVH(std::vector<FlatProduct>& products, int begin, int end,
                                   std::vector<ProductBVHNode>& bvh_nodes, bool useKD = true)
   {
-    auto curr_id = (uint32_t)bvh_nodes.size();
+    auto curr_id = static_cast<uint32_t>(bvh_nodes.size());
     bvh_nodes.emplace_back();  // placeholder, filled in below
 
     if (end - begin == 1) {  // LEAF
@@ -245,7 +230,7 @@ public:
     RTBounds right_bounds = buildProductBVH(products, mid, end, bvh_nodes, useKD);
 
     RTBounds combined = RTBounds::buildOperationBounds(OperationType::UNION, left_bounds, right_bounds);
-    uint32_t subtree_count = (uint32_t)bvh_nodes.size() - curr_id;
+    uint32_t subtree_count = static_cast<uint32_t>(bvh_nodes.size() - curr_id);
 
     ProductBVHNode& node = bvh_nodes[curr_id];
     node.is_leaf = 0;
@@ -271,10 +256,10 @@ public:
     for (uint32_t i = 0; i < count; i++) {
       if (cmds[start + i].type == 1u) {  // CMD_TYPE_OPERATION
         op_recv.push_back(0);
-        max_op_sp = std::max(max_op_sp, (uint32_t)op_recv.size());
+        max_op_sp = std::max(max_op_sp, static_cast<uint32_t>(op_recv.size()));
       } else {  // CMD_TYPE_PRIMITIVE
         res_sp++;
-        max_res_sp = std::max(max_res_sp, (uint32_t)res_sp);
+        max_res_sp = std::max(max_res_sp, static_cast<uint32_t>(res_sp));
         while (!op_recv.empty()) {
           op_recv.back()++;
           if (op_recv.back() < 2) break;
@@ -298,18 +283,18 @@ public:
 
     countDNFNodes(products);
 
-    std::map<RTCSGNode *, uint32_t> prim_cache;
+    std::unordered_map<RTCSGNode *, uint32_t> prim_cache;
 
     // Step 1: flatten each product into product_commands[], collecting its root bounds
     std::vector<FlatProduct> flat;
     flat.reserve(products.size());
     for (auto& prod_root : products) {
-      auto cmd_start = (uint32_t)product_commands.size();
+      auto cmd_start = static_cast<uint32_t>(product_commands.size());
       RTBounds root_bounds;
       flatten_product(prod_root, primitives, operations, product_commands, prim_cache, root_bounds);
       FlatProduct fp;
       fp.cmd_start = cmd_start;
-      fp.cmd_count = (uint32_t)product_commands.size() - cmd_start;
+      fp.cmd_count = static_cast<uint32_t>(product_commands.size() - cmd_start);
       fp.bounds = root_bounds;
       fp.centroid = boundsCenter(root_bounds);
       flat.push_back(std::move(fp));
